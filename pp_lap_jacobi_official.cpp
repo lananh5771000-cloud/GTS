@@ -111,6 +111,8 @@ int main() {
     printMatrix(D, "Ma tran D");
     printMatrix(Dinv, "Ma tran D^-1");
 
+    // alpha/beta DUNG DE LAP (cap nhat x) - LUON theo cong thuc chuan
+    // x_moi = D^-1(b - (A-D)x), bat ke cheo troi hang hay cot.
     vector<vector<double>> alpha(n, vector<double>(n, 0));
     vector<double> beta(n);
 
@@ -146,22 +148,35 @@ int main() {
         cout << "\nMa tran cheo troi cot.\n";
         useInfNorm = false;
 
+        // --- QUAN TRONG ---
+        // Cong thuc LAP van phai la D^-1(b-(A-D)x) nhu binh thuong,
+        // vi day la cach duy nhat de x=alpha*x+beta tuong duong Ax=b.
         for (int i = 0; i < n; i++)
             beta[i] = b[i] / A[i][i];
 
         for (int i = 0; i < n; i++)
             for (int j = 0; j < n; j++)
                 if (i != j)
-                    alpha[i][j] = -A[i][j] / A[j][j];
+                    alpha[i][j] = -A[i][j] / A[i][i];
 
-        printMatrix(alpha, "Alpha = I - AD^-1");
+        printMatrix(alpha, "Alpha = I - D^-1A (dung de cap nhat x)");
         printVector(beta, "Beta = D^-1b");
 
-        cout << "\nTinh q = ||alpha||1\n";
+        // Ma tran RIENG (AD^-1), chi dung de tinh q va chung minh hoi tu
+        // (khong duoc dung ma tran nay de cap nhat x!)
+        vector<vector<double>> alphaQ(n, vector<double>(n, 0));
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                if (i != j)
+                    alphaQ[i][j] = -A[i][j] / A[j][j];
+
+        printMatrix(alphaQ, "Alpha_q = I - AD^-1 (chi de tinh q)");
+
+        cout << "\nTinh q = ||alpha_q||1\n";
         for (int j = 0; j < n; j++) {
             double sum = 0;
             for (int i = 0; i < n; i++)
-                sum += fabs(alpha[i][j]);
+                sum += fabs(alphaQ[i][j]);
 
             cout << "Cot " << j + 1 << " = " << sum << endl;
             q = max(q, sum);
@@ -183,6 +198,7 @@ int main() {
     vector<double> errors;
 
     int k = 0;
+    const int MAX_ITER = 100000; // tranh lap vo han neu du lieu bat thuong
 
     while (true) {
         vector<double> xNew = multiply(alpha, x);
@@ -207,7 +223,7 @@ int main() {
 
         k++;
 
-        if (error < eps) {
+        if (error < eps || k >= MAX_ITER) {
             x = xNew;
             break;
         }
