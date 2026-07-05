@@ -8,6 +8,7 @@ from __future__ import annotations
 import itertools
 import math
 import sys
+import time
 from fractions import Fraction
 from dataclasses import dataclass, field
 from typing import Sequence
@@ -27,12 +28,16 @@ ALLOWED_FUNCTIONS = {
 }
 BAD_NAMES = {"nan", "NaN", "inf", "Inf", "Infinity", "zoo", "oo"}
 MAX_CANDIDATES = 5000
+MAX_ISOLATED_CANDIDATES = 100
+MAX_SUBREGION_CANDIDATES = 1000
+MAX_ADAPTIVE_BOXES = 4096
+DEFAULT_SEARCH_SECONDS = 10.0
 TOL = 1e-12
 EXAM_OUTPUT = True
 DEBUG_OUTPUT = False
 TYPE_PRIORITY = {
-    "direct": 0, "isolated": 0, "equivalent": 1,
-    "relaxation": 2, "unknown": 3,
+    "direct": 0, "equivalent": 1, "isolated": 2,
+    "relaxation": 3, "unknown": 4,
 }
 
 
@@ -210,8 +215,8 @@ def interval_evaluate(expr: sp.Expr, symbols, bounds):
 
 
 def adaptive_interval_evaluate_with_meta(expr: sp.Expr, symbols, bounds,
-                                         max_depth=8, max_boxes=4096,
-                                         target_width=None):
+                                         max_depth=8, max_boxes=MAX_ADAPTIVE_BOXES,
+                                         target_width=None, deadline=None):
     """Đánh giá chia hộp và trả cả metadata của chứng minh."""
     queue = [(list(bounds), 0)]
     accepted = []
@@ -223,6 +228,9 @@ def adaptive_interval_evaluate_with_meta(expr: sp.Expr, symbols, bounds,
             "boxes_used": boxes, "max_depth_used": max_depth_used,
             "method": "adaptive_subdivision"}
     while queue and boxes < max_boxes:
+        if deadline is not None and time.perf_counter() >= deadline:
+            return result(math.nan, math.nan, False,
+                          "đã đạt giới hạn thời gian chia miền")
         box, depth = queue.pop(0); boxes += 1
         max_depth_used = max(max_depth_used, depth)
         lo, hi, valid, reason = interval_evaluate(expr, symbols, box)
@@ -250,27 +258,30 @@ def adaptive_interval_evaluate_with_meta(expr: sp.Expr, symbols, bounds,
 
 
 def adaptive_interval_evaluate(expr: sp.Expr, symbols, bounds, max_depth=8,
-                               max_boxes=4096, target_width=None):
+                               max_boxes=MAX_ADAPTIVE_BOXES, target_width=None,
+                               deadline=None):
     """API tương thích: trả lower, upper, valid, reason."""
     return adaptive_interval_evaluate_with_meta(
-        expr, symbols, bounds, max_depth, max_boxes, target_width)[:4]
+        expr, symbols, bounds, max_depth, max_boxes, target_width,
+        deadline)[:4]
 
 
-def check_domain(phi, symbols, bounds):
+def check_domain(phi, symbols, bounds, deadline=None):
     details, ok = [], True
     for i, expr in enumerate(phi):
         lo, hi, valid, reason = interval_evaluate(expr, symbols, bounds)
         if not valid:
             lo, hi, valid, reason = adaptive_interval_evaluate(
-                expr, symbols, bounds, max_depth=8, max_boxes=4096)
+                expr, symbols, bounds, max_depth=8,
+                max_boxes=MAX_ADAPTIVE_BOXES, deadline=deadline)
         details.append((lo, hi, valid, reason))
         ok &= valid
     return bool(ok), details
 
 
-def check_mapping_subset_with_meta(phi, symbols, bounds):
+def check_mapping_subset_with_meta(phi, symbols, bounds, deadline=None):
     """Kiểm tra Phi(D) subset D và lưu đúng khoảng đã dùng chứng minh."""
-    domain_ok, ranges = check_domain(phi, symbols, bounds)
+    domain_ok, ranges = check_domain(phi, symbols, bounds, deadline)
     refined = []
     adaptive_used = False
     boxes_used = 0
@@ -280,7 +291,7 @@ def check_mapping_subset_with_meta(phi, symbols, bounds):
         if valid and not (a-TOL <= lo and hi <= b+TOL):
             lo, hi, valid, reason, meta = adaptive_interval_evaluate_with_meta(
                 expr, symbols, bounds, max_depth=8, max_boxes=4096,
-                target_width=max((b-a)/256, TOL))
+                target_width=max((b-a)/256, TOL), deadline=deadline)
             adaptive_used = True
             boxes_used += meta["boxes_used"]
             max_depth_used = max(max_depth_used, meta["max_depth_used"])
@@ -293,13 +304,14 @@ def check_mapping_subset_with_meta(phi, symbols, bounds):
     return ok, ranges, meta
 
 
-def check_mapping_subset(phi, symbols, bounds):
+def check_mapping_subset(phi, symbols, bounds, deadline=None):
     """API tương thích cho các chỗ chỉ cần kết luận và khoảng."""
-    ok, ranges, _ = check_mapping_subset_with_meta(phi, symbols, bounds)
+    ok, ranges, _ = check_mapping_subset_with_meta(
+        phi, symbols, bounds, deadline)
     return ok, ranges
 
 
-def bound_jacobian(phi, symbols, bounds):
+def bound_jacobian(phi, symbols, bounds, deadline=None):
     derivs, intervals, matrix = [], [], []
     valid = True
     for expr in phi:
@@ -321,7 +333,8 @@ def bound_jacobian(phi, symbols, bounds):
                 target = max((old[1]-old[0])/32, TOL) if old[2] else TOL
                 lo, hi, good, reason = adaptive_interval_evaluate(
                     derivative, symbols, bounds, max_depth=8,
-                    max_boxes=4096, target_width=target)
+                    max_boxes=MAX_ADAPTIVE_BOXES, target_width=target,
+                    deadline=deadline)
                 intervals[i][j] = (lo, hi, good, reason)
                 matrix[i][j] = max(abs(lo), abs(hi)) if good else math.inf
                 valid &= good
@@ -359,16 +372,31 @@ class Candidate:
                 and math.isfinite(self.q) and self.q < 1)
 
 
-def generate_isolation_candidates(F, symbols):
+def generate_isolation_candidates(F, symbols, bounds=None, deadline=None):
     choices = {x: [] for x in symbols}
     for r, equation in enumerate(F):
+        if deadline is not None and time.perf_counter() >= deadline: break
         for x in symbols:
+            if deadline is not None and time.perf_counter() >= deadline: break
             try:
                 roots = sp.solve(sp.Eq(equation, 0), x, check=True)
             except (NotImplementedError, ValueError, TypeError):
                 roots = []
             for root in roots:
+                if deadline is not None and time.perf_counter() >= deadline: break
                 root = sp.simplify(root)
+                if any(func.func not in set(ALLOWED_FUNCTIONS.values())
+                       for func in root.atoms(sp.Function)):
+                    continue
+                if bounds is not None:
+                    valid, _ = check_domain([root], symbols, bounds, deadline)
+                    if not valid: continue
+                    lo, hi, good, _ = adaptive_interval_evaluate(
+                        root, symbols, bounds, max_depth=5, max_boxes=256,
+                        deadline=deadline)
+                    target = bounds[list(symbols).index(x)]
+                    if good and (hi < target[0]-TOL or lo > target[1]+TOL):
+                        continue
                 # Khong chap nhan nhanh neu SymPy khong chung minh duoc rang
                 # the nguoc vao phuong trinh goc cho dong nhat 0.
                 verification = equation.subs(x, root)
@@ -397,7 +425,8 @@ def generate_isolation_candidates(F, symbols):
     if any(not choices[x] for x in symbols): return candidates
     # Backtracking dong thoi ghep song anh phuong trinh-bien.
     def visit(j, used, selected):
-        if len(candidates) >= MAX_CANDIDATES: return
+        if len(candidates) >= MAX_ISOLATED_CANDIDATES: return
+        if deadline is not None and time.perf_counter() >= deadline: return
         if j == len(symbols):
             candidates.append(Candidate(
                 [e for _, e in selected], "Rút biến đại số",
@@ -427,16 +456,29 @@ def generate_relaxation_candidates(F, symbols, bounds, x0):
     return result
 
 
-def generate_unit_rearrangement_candidates(F, symbols):
-    """Sinh x_j=x_j-F_r; điểm bất động tương đương chính xác với F_r=0."""
+def generate_canonical_equivalent_candidates(F, symbols, deadline=None):
+    """Sinh và xác minh x_j=x_j-F_r trước mọi phép solve."""
     result = []
     if len(symbols) <= 6:
         assignments = itertools.permutations(range(len(F)), len(symbols))
     else:
         assignments = [tuple(range(min(len(F), len(symbols))))]
     for assignment in itertools.islice(assignments, MAX_CANDIDATES):
+        if deadline is not None and time.perf_counter() >= deadline: break
         if len(assignment) != len(symbols): continue
-        phi = [sp.simplify(x - F[r]) for x, r in zip(symbols, assignment)]
+        phi, verified = [], True
+        for x, r in zip(symbols, assignment):
+            component = sp.simplify(x - F[r])
+            identity = x - component - F[r]
+            forms = []
+            for transform in (sp.simplify, sp.cancel, sp.factor, sp.trigsimp):
+                try: forms.append(transform(identity))
+                except (TypeError, ValueError, NotImplementedError,
+                        sp.PolynomialError): continue
+            if not any(value == 0 or value.equals(0) is True for value in forms):
+                verified = False; break
+            phi.append(component)
+        if not verified: continue
         result.append(Candidate(
             phi, "Biến đổi tương đương",
             [f"F{r+1}->{symbols[i]}" for i, r in enumerate(assignment)],
@@ -444,11 +486,17 @@ def generate_unit_rearrangement_candidates(F, symbols):
     return result
 
 
-def evaluate_phi_candidate(c, symbols, bounds):
-    c.domain_proven, c.domain_ranges = check_domain(c.phi, symbols, bounds)
+def generate_unit_rearrangement_candidates(F, symbols):
+    """Alias tương thích cho mã gọi cũ."""
+    return generate_canonical_equivalent_candidates(F, symbols)
+
+
+def evaluate_phi_candidate(c, symbols, bounds, deadline=None):
+    c.domain_proven, c.domain_ranges = check_domain(
+        c.phi, symbols, bounds, deadline)
     c.mapping_proven, c.mapping_ranges, meta = check_mapping_subset_with_meta(
-        c.phi, symbols, bounds)
-    data = bound_jacobian(c.phi, symbols, bounds)
+        c.phi, symbols, bounds, deadline)
+    data = bound_jacobian(c.phi, symbols, bounds, deadline)
     c.jacobian_data = data
     c.derivative_ranges = data[1]
     c.proof_bounds = [tuple(v) for v in bounds]
@@ -461,62 +509,115 @@ def evaluate_phi_candidate(c, symbols, bounds):
     return c
 
 
+def candidate_search_key(candidate):
+    """Khóa tìm kiếm ưu tiên dạng đơn giản, tránh nhánh nghịch đảo phức tạp."""
+    inverse_functions = {sp.asin, sp.acos, sp.atan, sp.asinh, sp.acosh,
+                         sp.atanh}
+    inverse_count = sum(expr.count(func) for expr in candidate.phi
+                        for func in inverse_functions)
+    root_count = sum(1 for expr in candidate.phi for power in expr.atoms(sp.Pow)
+                     if power.exp.is_Rational and power.exp.q > 1)
+    division_count = sum(1 for expr in candidate.phi for power in expr.atoms(sp.Pow)
+                         if power.exp.is_number and power.exp.is_negative)
+    return (TYPE_PRIORITY.get(candidate.candidate_type, 4),
+            candidate.complexity, inverse_count, root_count,
+            division_count, len(candidate.branches))
+
+
 def rank_candidates(candidates):
     return sorted(candidates, key=lambda c: (
         not c.domain_proven, not c.mapping_proven, not (c.q < 1),
-        TYPE_PRIORITY.get(c.candidate_type, 3), c.q,
-        c.complexity, len(c.branches)))
+        candidate_search_key(c), c.q))
 
 
-def build_phi_candidates(F, symbols, bounds, x0):
-    # Uu tien tuyet doi dang rut dai so. Chi sinh thu gian neu khong co
-    # dang rut nao du dieu kien Banach tren D.
-    isolated = generate_isolation_candidates(F, symbols)
-    isolated.extend(generate_unit_rearrangement_candidates(F, symbols))
-    isolated = [evaluate_phi_candidate(c, symbols, bounds) for c in isolated]
-    valid_isolated = [c for c in isolated if c.banach_proven]
-    if valid_isolated:
-        return rank_candidates(valid_isolated)
-    relaxed = [evaluate_phi_candidate(c, symbols, bounds)
-               for c in generate_relaxation_candidates(F, symbols, bounds, x0)]
-    pool = isolated + relaxed
-    unique = {}
-    for c in pool:
-        unique.setdefault(tuple(map(sp.srepr, c.phi)), c)
-    return rank_candidates(list(unique.values()))
+def build_phi_candidates(F, symbols, bounds, x0, deadline=None):
+    """Tìm Phi theo tầng equivalent -> isolated -> relaxation."""
+    attempted = []
+    def try_stage(raw_candidates, subregion_limit):
+        ordered = []
+        for candidate in raw_candidates:
+            candidate.complexity = sum(sp.count_ops(e) for e in candidate.phi)
+            ordered.append(candidate)
+        ordered.sort(key=candidate_search_key)
+        for candidate in ordered:
+            if deadline is not None and time.perf_counter() >= deadline: break
+            evaluate_phi_candidate(candidate, symbols, bounds, deadline)
+            attempted.append(candidate)
+            if candidate.banach_proven:
+                return [candidate]
+        for candidate in ordered[:subregion_limit]:
+            if deadline is not None and time.perf_counter() >= deadline: break
+            region = search_subregion(candidate.phi, symbols, bounds, x0,
+                                      deadline=deadline)
+            if region is None: continue
+            evaluate_phi_candidate(candidate, symbols, region, deadline)
+            if candidate.banach_proven:
+                return [candidate]
+        return []
+
+    equivalent = generate_canonical_equivalent_candidates(
+        F, symbols, deadline)
+    found = try_stage(equivalent, 5)
+    if found: return found
+    if deadline is not None and time.perf_counter() >= deadline:
+        return rank_candidates(attempted)
+
+    isolated = generate_isolation_candidates(F, symbols, bounds, deadline)
+    found = try_stage(isolated, 5)
+    if found: return found
+    if deadline is not None and time.perf_counter() >= deadline:
+        return rank_candidates(attempted)
+
+    relaxation = generate_relaxation_candidates(F, symbols, bounds, x0)[:4]
+    found = try_stage(relaxation, 4)
+    if found: return found
+    return rank_candidates(attempted)
 
 
-def search_subregion(phi, symbols, D, x0):
-    """Tim heuristic cac hop B; moi B van duoc chung minh bang so hoc khoang."""
+def search_subregion(phi, symbols, D, x0, deadline=None):
+    """Tìm miền con có giới hạn thời gian và số hộp xác định."""
     found = []
+    tried = 0
+    def expired():
+        return (tried >= MAX_SUBREGION_CANDIDATES or
+                (deadline is not None and time.perf_counter() >= deadline))
+    def test_box(box):
+        nonlocal tried
+        if expired(): return None
+        tried += 1
+        mapping, _ = check_mapping_subset(phi, symbols, box, deadline)
+        data = bound_jacobian(phi, symbols, box, deadline)
+        if mapping and data[5] and min(data[3], data[4]) < 1:
+            return min(data[3], data[4])
+        return None
     # Hộp tự nhiên: lấy biên độ giáo trình của từng thành phần, trong đó
     # sin/cos được chặn bởi [-1,1], rồi giao với D. Không nhận diện đề cụ thể.
     natural = []
     for expr, (a, b) in zip(phi, D):
+        if expired(): return None
         lo, hi, good = textbook_interval(expr, symbols, D)
         if not good or max(a, lo) >= min(b, hi):
             natural = []; break
         natural.append((max(a, lo), min(b, hi)))
     if natural:
-        mapping, _ = check_mapping_subset(phi, symbols, natural)
-        data = bound_jacobian(phi, symbols, natural)
-        if mapping and data[5] and min(data[3], data[4]) < 1:
+        q_natural = test_box(natural)
+        if q_natural is not None:
             return natural
         # Co miền tự nhiên bằng D^(m+1)=D^(m) giao Phi(D^(m)).
         current = natural
         for _ in range(8):
+            if expired(): break
             next_box = []
             for expr, (a, b) in zip(phi, current):
                 lo, hi, valid, _ = adaptive_interval_evaluate(
                     expr, symbols, current, max_depth=7, max_boxes=2048,
-                    target_width=max((b-a)/128, TOL))
+                    target_width=max((b-a)/128, TOL), deadline=deadline)
                 if not valid or max(a, lo) >= min(b, hi):
                     next_box = []; break
                 next_box.append((max(a, lo), min(b, hi)))
             if not next_box: break
-            mapping, _ = check_mapping_subset(phi, symbols, next_box)
-            data = bound_jacobian(phi, symbols, next_box)
-            if mapping and data[5] and min(data[3], data[4]) < 1:
+            q_next = test_box(next_box)
+            if q_next is not None:
                 return next_box
             if all(abs(a-c) + abs(b-d) <= TOL
                    for (a,b), (c,d) in zip(current, next_box)):
@@ -524,31 +625,29 @@ def search_subregion(phi, symbols, D, x0):
             current = next_box
     # Các hộp neo tại biên với tỉ lệ đơn giản thường cho lời giải dễ chép.
     simple_scales = (1/2, 1/3, 1/4, 2/3, 3/4)
-    anchored = []
     if len(D) <= 4:
         for factors in itertools.product(simple_scales, repeat=len(D)):
-            B = [(a, a + s * (b-a)) for (a, b), s in zip(D, factors)]
-            anchored.append(B)
-            B = [(b - s * (b-a), b) for (a, b), s in zip(D, factors)]
-            anchored.append(B)
-    for B in anchored:
-        mapping, _ = check_mapping_subset(phi, symbols, B)
-        data = bound_jacobian(phi, symbols, B)
-        if mapping and data[5] and min(data[3], data[4]) < 1:
-            found.append((math.prod(b-a for a, b in B),
-                          min(data[3], data[4]), B))
+            if expired(): break
+            for B in ([(a, a+s*(b-a)) for (a,b),s in zip(D,factors)],
+                      [(b-s*(b-a), b) for (a,b),s in zip(D,factors)]):
+                q_box = test_box(B)
+                if q_box is not None:
+                    volume = math.prod(b-a for a,b in B)
+                    if q_box <= 0.5: return B
+                    found.append((volume, q_box, B))
     scales = (0.9, 0.75, 0.6, 0.5, 0.35, 0.25, 0.15, 0.1, 0.05)
     factor_sets = itertools.product(scales, repeat=len(D))
     if len(D) > 4:
         factor_sets = itertools.islice(factor_sets, 5000)
     for factors in factor_sets:
+        if expired(): break
         B = [(max(a, x - s * (x - a)), min(b, x + s * (b - x)))
              for (a, b), x, s in zip(D, x0, factors)]
-        mapping, _ = check_mapping_subset(phi, symbols, B)
-        data = bound_jacobian(phi, symbols, B)
-        if mapping and data[5] and min(data[3], data[4]) < 1:
+        q_box = test_box(B)
+        if q_box is not None:
             volume = math.prod(b - a for a, b in B)
-            found.append((volume, min(data[3], data[4]), B))
+            if q_box <= 0.5: return B
+            found.append((volume, q_box, B))
     return max(found, key=lambda z: (z[0], -z[1]))[2] if found else None
 
 
@@ -969,7 +1068,7 @@ def fixed_point_iteration(phi, symbols, x0, bounds, q, norm, F=None,
     if exact_steps is None and fixed0 <= TOL and residual_ok0:
         status = "certified" if banach_proven else "numerical_only"
         return {"x": x, "rows": rows, "status": status,
-                "reason": "Diem ban dau da la nghiem.", "steps": 0}
+                "reason": "Điểm ban đầu đã là nghiệm.", "steps": 0}
 
     limit = exact_steps if exact_steps is not None else max_iter
     status, reason = "max_iter", "Đã đạt giới hạn số bước lặp."
@@ -985,7 +1084,7 @@ def fixed_point_iteration(phi, symbols, x0, bounds, q, norm, F=None,
         if any(not (a - TOL <= y <= b + TOL)
                for y, (a, b) in zip(new, bounds)):
             status = "left_domain"
-            reason = "Day lap da ra ngoai mien dung de chung minh hoi tu."
+            reason = "Dãy lặp đã ra ngoài miền dùng để chứng minh hội tụ."
             break
         diff = vector_norm([a-b for a, b in zip(new, x)], norm)
         fixed_res = vector_norm([a-b for a, b in zip(phi_at_new, new)], norm)
@@ -995,6 +1094,8 @@ def fixed_point_iteration(phi, symbols, x0, bounds, q, norm, F=None,
             error = e1  # Công thức hậu nghiệm theo giáo trình.
             new_norm = vector_norm(new, norm)
             rel = diff / new_norm if new_norm > 0 else None
+            if q == 0 and fixed_res <= TOL:
+                e1 = e2 = error = rel = 0.0
         rows.append((k, list(new), error, residual, e1, e2, rel))
         x = new
         if exact_steps is None and epsilon is not None:
@@ -1005,7 +1106,7 @@ def fixed_point_iteration(phi, symbols, x0, bounds, q, norm, F=None,
             if q == 0 and fixed_res <= TOL:
                 error_ok = True
             if banach_proven and error_ok and residual_ok:
-                status, reason = "certified", "Dat sai so hau nghiem va phan du he."
+                status, reason = "certified", "Đạt sai số hậu nghiệm và phần dư hệ."
                 break
             if not banach_proven and diff <= epsilon and fixed_res <= epsilon and residual_ok:
                 status = "numerical_only"
@@ -1017,7 +1118,7 @@ def fixed_point_iteration(phi, symbols, x0, bounds, q, norm, F=None,
         history.append(tuple(new))
     else:
         if exact_steps is not None:
-            status, reason = "fixed_steps", f"Da thuc hien dung {exact_steps} buoc."
+            status, reason = "fixed_steps", f"Đã thực hiện đúng {exact_steps} bước."
     return {"x": x, "rows": rows, "status": status, "reason": reason,
             "steps": rows[-1][0] if rows else 0}
 
@@ -1081,7 +1182,10 @@ def print_exam_proof(candidate, symbols, bounds, F=None, direct=False,
     print("B1. Kiểm tra Φ(D) ⊂ D.  B2. Tính JΦ và hệ số co q.")
     print("B3. Chọn t₀ ∈ D.  B4. Lặp tₖ = Φ(tₖ₋₁).")
     if stop_kind == "relative":
-        print("B5. Dừng khi ||tₖ−tₖ₋₁||/||tₖ|| ≤ (1−q)δ/q.  B6. Trả ra nghiệm gần đúng.")
+        if candidate.q == 0:
+            print("B5. Vì q=0, dừng khi Φ(t₁)=t₁.  B6. Trả ra nghiệm gần đúng.")
+        else:
+            print("B5. Dừng khi ||tₖ−tₖ₋₁||/||tₖ|| ≤ (1−q)δ/q.  B6. Trả ra nghiệm gần đúng.")
     elif stop_kind == "absolute":
         print("B5. Dừng khi q||tₖ−tₖ₋₁||/(1−q) ≤ δ.  B6. Trả ra nghiệm gần đúng.")
     else:
@@ -1198,7 +1302,11 @@ def print_iteration_formula(candidate, symbols, x0, precision=7,
         print(f"  {_symbol_text(symbols[i])},ₖ = {format_math_expr(rhs, symbol_map)}")
     if candidate.banach_proven:
         print("Chỉ dùng đánh giá hậu nghiệm:")
-        print("  Eₖ = q/(1-q) · ||tₖ-tₖ₋₁||.")
+        if candidate.q == 0:
+            print("  Vì q=0 nên Φ là ánh xạ hằng.")
+            print("  Sau một bước lặp, nếu Φ(t₁)=t₁ thì sai số hậu nghiệm bằng 0.")
+        else:
+            print("  Eₖ = q/(1-q) · ||tₖ-tₖ₋₁||.")
 
 
 def print_iteration_table(result, precision, stop_kind, norm):
@@ -1212,28 +1320,31 @@ def print_iteration_table(result, precision, stop_kind, norm):
         headers.append("||tₖ-tₖ₋₁||")
     rows = []
     previous = None
-    for k, x, error, _, _, _, _ in result["rows"]:
+    for k, x, error, _, _, _, relative_measure in result["rows"]:
         measure = None
         if previous is not None:
             diff = vector_norm([a-b for a,b in zip(x, previous)], norm)
-            measure = diff / vector_norm(x, norm) if stop_kind == "relative" and vector_norm(x, norm) else (
-                error if stop_kind == "absolute" else diff)
+            if stop_kind == "relative":
+                measure = relative_measure
+            else:
+                measure = error if stop_kind == "absolute" else diff
         rows.append([str(k), format_vector(x, precision), format_number(measure, precision)])
         previous = x
     print_math_table(headers, rows)
 
 
-def looks_like_direct_phi(expressions, symbols, bounds, seed):
+def looks_like_direct_phi(expressions, symbols, bounds, seed, deadline=None):
     """Kiểm tra ngầm khả năng người dùng đã nhập Phi thay cho F."""
     candidate = evaluate_phi_candidate(
         Candidate(list(expressions), "Nhập trực tiếp",
-                  candidate_type="direct"), symbols, bounds)
+                  candidate_type="direct"), symbols, bounds, deadline)
     if candidate.banach_proven:
         return True
-    region = search_subregion(candidate.phi, symbols, bounds, seed)
+    region = search_subregion(candidate.phi, symbols, bounds, seed, deadline)
     if region is None:
         return False
-    return evaluate_phi_candidate(candidate, symbols, region).banach_proven
+    return evaluate_phi_candidate(
+        candidate, symbols, region, deadline).banach_proven
 
 
 
@@ -1265,12 +1376,15 @@ def exam_main():
     bounds = read_bounds(n)
     precision = read_int("Số chữ số hiển thị = ", 0)
     seed = [(a+b)/2 for a, b in bounds]
+    search_deadline = time.perf_counter() + DEFAULT_SEARCH_SECONDS
     candidates = ([evaluate_phi_candidate(Candidate(
                       phi_direct, "Nhập trực tiếp", candidate_type="direct"),
-                  symbols, bounds)]
-                  if phi_direct is not None else build_phi_candidates(F, symbols, bounds, seed))
+                  symbols, bounds, search_deadline)]
+                  if phi_direct is not None else build_phi_candidates(
+                      F, symbols, bounds, seed, search_deadline))
     if (mode == 1 and not any(c.banach_proven for c in candidates)
-            and looks_like_direct_phi(F, symbols, bounds, seed)):
+            and looks_like_direct_phi(F, symbols, bounds, seed,
+                                     search_deadline)):
         print("Các biểu thức vừa nhập có vẻ là các thành phần của Phi,")
         print("không phải các vế trái F_i(x)=0.\n")
         answer = input("Có hiểu chúng là x1 = biểu thức 1, ..., xn = biểu thức n không? [C/k]: ").strip().lower()
@@ -1278,7 +1392,7 @@ def exam_main():
             phi_direct, F, mode = list(F), None, 2
             candidates = [evaluate_phi_candidate(
                 Candidate(phi_direct, "Nhập trực tiếp", candidate_type="direct"),
-                symbols, bounds)]
+                symbols, bounds, search_deadline)]
         else:
             print("Nếu phương trình là x1 = phi_1 thì cần nhập:")
             print("F1 = x1 - phi_1.")
@@ -1288,9 +1402,11 @@ def exam_main():
     nonproven = [c for c in candidates if not c.banach_proven]
     nonproven.sort(key=lambda c: (
         TYPE_PRIORITY.get(c.candidate_type, 3), c.complexity))
-    scan = [(c, bounds) for c in proven_on_D[:20]]
+    scan = [(c, c.proof_bounds or bounds) for c in proven_on_D[:20]]
     for candidate in nonproven[:10]:
-        B = search_subregion(candidate.phi, symbols, bounds, seed)
+        if time.perf_counter() >= search_deadline: break
+        B = search_subregion(candidate.phi, symbols, bounds, seed,
+                             search_deadline)
         if B is not None:
             scan.append((candidate, B))
             if candidate.candidate_type == "equivalent":
@@ -1298,21 +1414,27 @@ def exam_main():
     for candidate, region in scan:
         regions = [region]
         for region in regions:
-            evaluated = evaluate_phi_candidate(candidate, symbols, region)
+            evaluated = evaluate_phi_candidate(
+                candidate, symbols, region, search_deadline)
             if not evaluated.banach_proven: continue
             volume = math.prod(b-a for a, b in region)
             endpoint_cost = sum(Fraction(v).limit_denominator(100).denominator
                                 for interval in region for v in interval)
-            choices.append((round(evaluated.q, 8), -volume,
+            choices.append((TYPE_PRIORITY.get(evaluated.candidate_type, 4),
+                            round(evaluated.q, 8), -volume,
                             evaluated.complexity, endpoint_cost,
                             evaluated, region))
     if not choices:
+        if time.perf_counter() >= search_deadline:
+            print("Quá trình tự tìm dạng lặp đã đạt giới hạn thời gian.")
+            print("Hãy nhập trực tiếp dạng lặp Phi nếu đã biến đổi được hệ.")
+            return
         print("Không tìm được dạng lặp đơn thỏa điều kiện hội tụ trên miền đã cho.")
         print("Chưa chứng minh được điều kiện trên toàn miền bằng số học khoảng.")
         print("Chương trình chưa tìm được miền con thích hợp trong giới hạn tìm kiếm.")
         print("Không thể tiếp tục lời giải có bảo đảm bằng phương pháp lặp đơn.")
         return
-    _, _, _, _, chosen, active_bounds = min(choices, key=lambda z: z[:4])
+    _, _, _, _, _, chosen, active_bounds = min(choices, key=lambda z: z[:5])
 
     chosen = prepare_textbook_bounds(chosen, symbols, active_bounds, precision)
     print("\nChọn giá trị ban đầu:\n1. Nhập t₀\n2. Tự chọn trung điểm miền cuối cùng (mặc định)")
@@ -1343,8 +1465,8 @@ def exam_main():
         return
     print_iteration_formula(chosen, symbols, x0, precision, active_bounds,
                             midpoint=initial_choice != 1)
-    if relative:
-        threshold = math.inf if chosen.q == 0 else (1-chosen.q)/chosen.q * epsilon
+    if relative and chosen.q != 0:
+        threshold = (1-chosen.q)/chosen.q * epsilon
         print(f"Ngưỡng dừng tương đối: (1-q)/q · δ = {format_number(threshold, precision)}.")
     F_lipschitz, F_scale = bound_system_lipschitz(F, symbols, active_bounds)
     result = fixed_point_iteration(
@@ -1356,8 +1478,19 @@ def exam_main():
     print("\nPHẦN 9. KIỂM TRA ĐIỀU KIỆN DỪNG")
     last = result["rows"][-1] if result["rows"] else None
     if epsilon is not None and last is not None:
-        if relative:
-            threshold = math.inf if chosen.q == 0 else (1-chosen.q)/chosen.q * epsilon
+        if result.get("steps") == 0 and result.get("status") == "certified":
+            print("t₀ = Φ(t₀), do đó t₀ đã là điểm bất động.")
+            print(f"E₀ = 0 ≤ δ = {format_number(epsilon, precision)}.")
+            if relative:
+                print("Sai số tương đối bằng 0.")
+        elif chosen.q == 0:
+            print("Vì q=0 nên Φ là ánh xạ hằng.")
+            print("Sau một bước lặp thu được điểm cố định chính xác của ánh xạ.")
+            print(f"Sai số hậu nghiệm E₁ = 0 ≤ δ = {format_number(epsilon, precision)}.")
+            if relative:
+                print("Sai số tương đối bằng 0.")
+        elif relative:
+            threshold = (1-chosen.q)/chosen.q * epsilon
             print(f"||tₖ-tₖ₋₁||/||tₖ|| = {format_number(last[6], precision)} "
                   f"≤ (1-q)/q · δ = {format_number(threshold, precision)}.")
         else:
