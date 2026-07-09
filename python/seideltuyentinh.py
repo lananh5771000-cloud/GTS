@@ -10,8 +10,9 @@ Nguyên tắc của bản này:
 """
 
 import math
+from exam_format import exam_print as print, to_subscript
+from input_utils import MathInputError, parse_real as parse_input_real, split_number_row
 import sys
-from fractions import Fraction
 from itertools import permutations
 
 import numpy as np
@@ -24,7 +25,6 @@ except ImportError:
 
 ZERO_TOL = 1e-14
 HUGE_VALUE = 1e100
-DISPLAY_FRACTIONS = False
 
 
 # ============================================================================
@@ -38,12 +38,12 @@ def parse_number(text):
         raise ValueError("Thiếu giá trị.")
     try:
         if sp is not None:
-            value = sp.sympify(text, locals={"sqrt": sp.sqrt})
+            value = sp.Float(parse_input_real(text))
             if value.is_real is False or value.free_symbols:
                 raise ValueError(f"'{text}' không phải số thực.")
             result = float(value.evalf())
         elif "/" in text:
-            result = float(Fraction(text))
+            result = parse_input_real(text)
         else:
             result = float(text)
     except (TypeError, ValueError, ZeroDivisionError, SyntaxError) as exc:
@@ -54,9 +54,10 @@ def parse_number(text):
 
 
 def parse_numbers(line, expected):
-    parts = line.split()
-    if len(parts) != expected:
-        raise ValueError(f"Cần đúng {expected} phần tử, đã nhận {len(parts)}.")
+    try:
+        parts = split_number_row(line, expected)
+    except MathInputError as exc:
+        raise ValueError(str(exc)) from exc
     return np.array([parse_number(item) for item in parts], dtype=float)
 
 
@@ -118,8 +119,6 @@ def _display_number(value, precision):
     threshold = 0.5 * 10.0 ** (-precision) if precision > 0 else 0.5
     if abs(value) < threshold:
         value = 0.0
-    if DISPLAY_FRACTIONS:
-        return str(Fraction(value).limit_denominator(10000))
     if value != 0 and (
         abs(value) >= 10 ** (precision + 2) or abs(value) < 10 ** (-max(precision, 1))
     ):
@@ -658,6 +657,269 @@ def _diagnose(xs, residuals, epsilon):
     return None
 
 
+def seidel_fixed_point(
+    b_matrix,
+    d,
+    x0=None,
+    epsilon=1e-6,
+    max_iter=500,
+    precision=6,
+    show=True,
+    fixed_iterations=None,
+    stop_mode="both",
+    residual_tolerance=None,
+):
+    """Lặp Seidel *trực tiếp* cho ``x=B x+d``.
+
+    Thành phần đường chéo của ``B`` thuộc tổng dùng vòng cũ::
+
+        x_i^(k+1) = d_i + sum_(j<i) b_ij x_j^(k+1)
+                        + sum_(j>=i) b_ij x_j^(k).
+
+    Đây không phải là việc đổi bài toán sang ``(I-B)x=d`` rồi áp dụng công
+    thức Seidel của hệ ``Ax=b``; hai cách có các bước trung gian khác nhau.
+    """
+    valid_stop_modes = {"absolute", "relative", "residual", "both"}
+    if stop_mode not in valid_stop_modes:
+        raise ValueError(
+            "stop_mode phải là 'absolute', 'relative', 'residual' hoặc 'both'."
+        )
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError("epsilon phải là số hữu hạn dương.")
+    if not isinstance(max_iter, (int, np.integer)) or max_iter <= 0:
+        raise ValueError("max_iter phải là số nguyên dương.")
+    if fixed_iterations is not None and (
+        not isinstance(fixed_iterations, (int, np.integer))
+        or fixed_iterations < 0
+    ):
+        raise ValueError("fixed_iterations phải là số nguyên không âm.")
+    if residual_tolerance is None:
+        residual_tolerance = epsilon
+    if not math.isfinite(residual_tolerance) or residual_tolerance <= 0:
+        raise ValueError("residual_tolerance phải là số hữu hạn dương.")
+
+    B = np.asarray(b_matrix, dtype=float)
+    d = np.asarray(d, dtype=float)
+    if B.ndim != 2 or B.shape[0] == 0 or B.shape[0] != B.shape[1]:
+        raise ValueError("B phải là ma trận vuông cấp n>0.")
+    n = B.shape[0]
+    if d.shape != (n,):
+        raise ValueError("d phải là vector có đúng n phần tử.")
+    if not np.all(np.isfinite(B)) or not np.all(np.isfinite(d)):
+        raise ValueError("B và d không được chứa NaN hoặc vô cùng.")
+    x = np.zeros(n, dtype=float) if x0 is None else np.asarray(x0, dtype=float).copy()
+    if x.shape != (n,) or not np.all(np.isfinite(x)):
+        raise ValueError("x0 sai kích thước hoặc chứa NaN/vô cùng.")
+
+    # (I-L_B)x^(k+1)=(D_B+U_B)x^(k)+d.  Chỉ dùng thế tiến,
+    # không gọi bộ giải hệ thư viện.
+    lower = np.tril(B, -1)
+    old_part = np.triu(B, 0)
+    identity_minus_lower = np.eye(n) - lower
+    iteration = forward_substitution(identity_minus_lower, old_part)
+    constant = forward_substitution(identity_minus_lower, d)
+    q_iteration = matrix_norm_inf(iteration)
+    q_mapping = matrix_norm_inf(B)
+    beta = np.zeros(n, dtype=float)
+    for i in range(n):
+        beta[i] = (
+            float(np.abs(B[i, :i]) @ beta[:i])
+            + float(np.sum(np.abs(B[i, i:])))
+        )
+    q_sassenfeld = float(np.max(beta))
+    q = q_iteration
+    theory = q < 1.0
+
+    def fixed_residual(value):
+        return vector_norm_inf(value - B @ value - d)
+
+    def relative_fixed_residual(value, residual):
+        scale = vector_norm_inf(value) + matrix_norm_inf(B) * vector_norm_inf(value) + vector_norm_inf(d)
+        return residual / scale if scale else residual
+
+    residual0 = fixed_residual(x)
+    history = [{
+        "k": 0,
+        "x": x.copy(),
+        "step": 0.0,
+        "relative_step": 0.0,
+        "residual": residual0,
+        "relative_residual": relative_fixed_residual(x, residual0),
+        "error_bound": math.nan,
+    }]
+    converged = residual0 == 0.0
+    certified = converged
+    fixed_completed = fixed_iterations == 0
+    reason = (
+        "x^(0) thỏa x=B x+d trong số học máy."
+        if converged
+        else ""
+    )
+
+    if show:
+        print("\n" + "=" * 92)
+        print("SEIDEL TRỰC TIẾP CHO x=B x+d")
+        print("=" * 92)
+        print_matrix("B", B, precision)
+        print_matrix("d", d, precision)
+        print_matrix("x^(0)", x, precision)
+        print("\nCông thức tổng quát:")
+        print("  x_i^(k+1)=d_i+Σ_(j=1..i-1)b_ij·x_j^(k+1)")
+        print("                    +Σ_(j=i..n)b_ij·x_j^(k).")
+        print("  Tổng thứ hai chứa b_ii·x_i^(k); không đổi sang (I-B)x=d.")
+        print("\nCông thức cụ thể:")
+        for i in range(n):
+            new_terms = " ".join(
+                f"+({B[i, j]:.{precision}g})x_{j + 1}^(k+1)" for j in range(i)
+            )
+            old_terms = " ".join(
+                f"+({B[i, j]:.{precision}g})x_{j + 1}^(k)" for j in range(i, n)
+            )
+            print(f"  x_{i + 1}^(k+1)={d[i]:.{precision}g} {new_terms} {old_terms}")
+        print("\nPhân tích hội tụ của đúng phép lặp tuần tự này:")
+        print("  (I-L_B)x^(k+1)=(D_B+U_B)x^(k)+d")
+        print_matrix("B_1=L_B", lower, precision)
+        print_matrix("B_2=D_B+U_B", old_part, precision)
+        print_matrix("Tₛ=(I-L_B)^(-1)(D_B+U_B)", iteration, precision)
+        print(f"  ||B||∞={q_mapping:.{precision}g}")
+        print(
+            "  β_i=Σ_(j<i)|b_ij|β_j+Σ_(j≥i)|b_ij|: "
+            + ", ".join(
+                f"β{to_subscript(i + 1)}={value:.{precision}g}"
+                for i, value in enumerate(beta)
+            )
+        )
+        print(f"  β=max β_i={q_sassenfeld:.{precision}g}; ||Tₛ||∞={q_iteration:.{precision}g}.")
+        if theory:
+            print("  Vì ||Tₛ||∞<1, phép lặp là ánh xạ co và hội tụ với mọi x^(0).")
+        else:
+            print("  Chưa chứng minh được hội tụ bằng chuẩn ∞; điều này không có nghĩa là phân kỳ.")
+        if fixed_iterations is not None:
+            print(f"\nYêu cầu: thực hiện đúng k={fixed_iterations} bước, không dừng sớm.")
+        else:
+            print(f"\nYêu cầu: lặp đến epsilon={epsilon:.{precision}e}, chế độ '{stop_mode}'.")
+        print("\nBẢNG LẶP")
+        print("  Mỗi x_i mới được dùng ngay cho các thành phần đứng sau trong cùng vòng.")
+
+    loop_limit = (
+        fixed_iterations
+        if fixed_iterations is not None
+        else (0 if converged else max_iter)
+    )
+    k = 0
+    for k in range(1, loop_limit + 1):
+        old = x.copy()
+        component_details = []
+        for i in range(n):
+            new_sum = float(B[i, :i] @ x[:i])
+            old_sum = float(B[i, i:] @ old[i:])
+            x[i] = d[i] + new_sum + old_sum
+            component_details.append((i, new_sum, old_sum, float(x[i])))
+
+        if not np.all(np.isfinite(x)) or vector_norm_inf(x) > HUGE_VALUE:
+            reason = "Giá trị lặp không hữu hạn hoặc tăng quá lớn; phát hiện phân kỳ số."
+            break
+        step = vector_norm_inf(x - old)
+        relative_step = step / max(1.0, vector_norm_inf(x))
+        residual = fixed_residual(x)
+        relative_residual = relative_fixed_residual(x, residual)
+        error_bound = q / (1 - q) * step if theory else math.nan
+        history.append({
+            "k": k,
+            "x": x.copy(),
+            "step": step,
+            "relative_step": relative_step,
+            "residual": residual,
+            "relative_residual": relative_residual,
+            "error_bound": error_bound,
+            "components": component_details,
+        })
+
+        absolute_ok = step <= epsilon
+        relative_ok = relative_step <= epsilon
+        residual_ok = residual <= residual_tolerance
+        stop_ok = {
+            "absolute": absolute_ok,
+            "relative": relative_ok,
+            "residual": residual_ok,
+            "both": absolute_ok and residual_ok,
+        }[stop_mode]
+
+        if show:
+            print_matrix(f"x^({k})", x, precision)
+            for i, new_sum, old_sum, value in component_details:
+                print(
+                    f"  x_{i + 1}^({k})=d_{i + 1}"
+                    f" + ({new_sum:.{precision}g})[mới]"
+                    f" + ({old_sum:.{precision}g})[cũ]"
+                    f" = {value:.{precision}g}"
+                )
+            print(
+                f"  ||x^({k})-x^({k - 1})||∞={step:.{precision}e}; "
+                f"||x^({k})-Bx^({k})-d||∞={residual:.{precision}e}"
+            )
+
+        if fixed_iterations is None and stop_ok:
+            converged = True
+            certified = bool(theory and error_bound <= epsilon and residual_ok)
+            reason = (
+                "Đạt điều kiện dừng đã chọn và residual điểm bất động."
+                if residual_ok
+                else "Đạt điều kiện dừng đã chọn."
+            )
+            break
+        if fixed_iterations is None:
+            diagnosis = _diagnose([row["x"] for row in history], [row["residual"] for row in history], epsilon)
+            if diagnosis:
+                reason = diagnosis
+                break
+    else:
+        if fixed_iterations is not None:
+            fixed_completed = True
+            reason = f"Đã thực hiện đúng {fixed_iterations} bước."
+        elif not converged:
+            reason = "Hết max_iter nhưng chưa đạt điều kiện dừng."
+
+    final_residual_vector = x - B @ x - d
+    final_residual = vector_norm_inf(final_residual_vector)
+    info = {
+        "converged": converged,
+        "certified": certified,
+        "fixed_iterations_completed": fixed_completed,
+        "iterations": k,
+        "history": history,
+        "iteration_matrix": iteration,
+        "constant_vector": constant,
+        "q": q,
+        "q_mapping": q_mapping,
+        "sassenfeld_beta": beta,
+        "q_sassenfeld": q_sassenfeld,
+        "residual": final_residual,
+        "residual_vector": final_residual_vector,
+        "reason": reason,
+    }
+    if show:
+        print("\nKẾT LUẬN")
+        print(reason)
+        if fixed_completed:
+            print("Kết quả sau đúng k bước không tự động đồng nghĩa dãy đã hội tụ.")
+            if math.isfinite(history[-1]["error_bound"]):
+                print(
+                    f"Chặn sai số sau k bước: ||x^({k})-x*||∞ <= "
+                    f"{history[-1]['error_bound']:.{precision}e}."
+                )
+            else:
+                print("Chưa có chặn sai số lý thuyết cho kết quả sau k bước trong nhánh hiện tại.")
+        print_matrix(f"x^({k})", x, precision)
+        print_matrix(f"x^({k})-B x^({k})-d", final_residual_vector, precision)
+        print(f"||x^({k})-B x^({k})-d||∞={final_residual:.{precision}e}")
+    return x, info
+
+
+# Tên gọi rõ nghĩa khác để dùng thuận tiện trong bài kiểm thử/bài thi.
+gauss_seidel_fixed_point = seidel_fixed_point
+
+
 def gauss_seidel(
     a,
     b,
@@ -782,7 +1044,8 @@ def gauss_seidel(
             else:
                 print("\n  1) A không có chứng nhận SPD bằng phân tích LDL^T.")
                 print("\n  2) Chuẩn ma trận lặp:")
-                print("     T=-(D+L_A)^(-1)U_A và q_T=||T||∞=max_i Σ_j|t_ij|.")
+                print("     Tₛ=-(D+L_A)^(-1)U_A và q_T=||Tₛ||∞=max_i Σ_j|t_ij|.")
+                print_matrix("Tₛ=-(D+L_A)^(-1)U_A", analysis["T"], precision)
                 print(f"     q_T={analysis['q_direct']:.{precision}g}.")
                 if analysis["q_direct"] < 1:
                     print("     Vì q_T<1, ánh xạ x↦Tx+g là ánh xạ co ⇒ dãy Seidel hội tụ.")
@@ -794,7 +1057,7 @@ def gauss_seidel(
                 print("     β=max_i β_i.")
                 print(
                     "     " + ", ".join(
-                        f"β_{i + 1}={value:.{precision}g}"
+                        f"β{to_subscript(i + 1)}={value:.{precision}g}"
                         for i, value in enumerate(analysis["beta"])
                     )
                 )
@@ -1094,6 +1357,16 @@ def gauss_seidel(
             print(
                 "Đây là giá trị sau đúng số bước yêu cầu, không tự động đồng nghĩa đã hội tụ."
             )
+            if math.isfinite(error_bound):
+                print(
+                    f"Vì có hệ số co q<1, chặn sai số sau k bước là "
+                    f"E_k={error_bound:.{precision}e}."
+                )
+            else:
+                print(
+                    "Chưa có chặn sai số nghiệm theo chuẩn ∞ cho kết quả sau k bước "
+                    "trong nhánh hiện tại."
+                )
         elif certified:
             print(reason)
             print(
@@ -1242,13 +1515,23 @@ def print_exam_overview(task_choice):
     if task_choice == "1":
         print("  • Ma trận vuông A, vector b, vector đầu x^(0).")
     elif task_choice == "2":
-        print("  • Ma trận vuông A, ma trận nhiều vế phải B và vector đầu x^(0).")
-    else:
+        print("  • Ma trận B, vector d và x^(0) của dạng đề x=B x+d.")
+        print("  • Không yêu cầu nhập A hoặc b và không đổi bài toán sang (I-B)x=d.")
+    elif task_choice == "3":
         print("  • Ma trận khả nghịch A; giải lần lượt A x_j=e_j để ghép A^(-1).")
+    else:
+        print("  • Ma trận vuông A, ma trận nhiều vế phải B và vector đầu x^(0).")
     print("  • Sai số epsilon hoặc số bước lặp k theo yêu cầu đề bài.")
     print("Output:")
     print("  • Nghiệm gần đúng, bảng lặp, chặn sai số và phần dư kiểm tra.")
-    print("Các bước cho một vế phải:")
+    if task_choice == "2":
+        print("Các bước Seidel trực tiếp cho dạng điểm bất động:")
+        print("  B1. Giữ nguyên dữ liệu B,d và tách B=L_B+D_B+U_B.")
+        print("  B2. Tính tuần tự:")
+        print("      x_i^(k+1)=d_i+Σ_(j<i)b_ij x_j^(k+1)+Σ_(j≥i)b_ij x_j^(k).")
+        print("  B3. Kiểm tra ||x^(k)-Bx^(k)-d||∞ trên đúng bài toán đã cho.")
+        return
+    print("Các bước cho một vế phải Ax=b:")
     print("  B1. Phân tách A=D+L+U và kiểm tra điều kiện hội tụ.")
     print("  B2. Với i=1,...,n, tính tuần tự:")
     print("      x_i^(k+1)=[b_i-Σ_(j<i)a_ij x_j^(k+1)-Σ_(j>i)a_ij x_j^(k)]/a_ii.")
@@ -1257,39 +1540,79 @@ def print_exam_overview(task_choice):
 
 
 def main():
-    global DISPLAY_FRACTIONS
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
 
     print("GAUSS–SEIDEL – BÀI GIẢI CHI TIẾT")
     print("1. Giải hệ Ax=b")
-    print("2. Giải nhiều vế phải AX=B")
-    print("3. Tìm A^(-1) bằng cách giải AX=I")
+    print("2. Seidel trực tiếp cho x=Bx+d")
+    print("3. Tìm A^(-1) bằng Seidel (giải AX=I)")
+    print("4. Giải nhiều vế phải AX=B")
     print("0. Thoát")
     choice = input("Chọn [1]: ").strip() or "1"
     if choice == "0":
         return
-    if choice not in {"1", "2", "3"}:
+    if choice not in {"1", "2", "3", "4"}:
         print("Lựa chọn không hợp lệ.")
         return
 
     print_exam_overview(choice)
 
     try:
+        if choice == "2":
+            n = read_int("Cấp n = ", minimum=1)
+            b_matrix = read_matrix(n, n, "B")
+            d = read_vector(n, f"Nhập d ({n} phần tử): ")
+            x0 = read_vector(n, f"Nhập x^(0) ({n} phần tử, Enter=0): ", default=0.0)
+            print("Chế độ chạy:")
+            print("1. Thực hiện đúng k bước")
+            print("2. Lặp đến sai số epsilon")
+            direct_mode = input("Chọn [1]: ").strip() or "1"
+            if direct_mode not in {"1", "2"}:
+                raise ValueError("Chế độ chạy không hợp lệ.")
+            if direct_mode == "1":
+                fixed_iterations = read_int("Số bước k = ", minimum=0)
+                epsilon = 1e-6
+                max_iter = max(1, fixed_iterations)
+                stop_mode = "both"
+                residual_tolerance = epsilon
+            else:
+                epsilon = read_float("epsilon [1e-6] = ", positive=True, default=1e-6)
+                max_iter = read_int("max_iter [500] = ", minimum=1, default=500)
+                fixed_iterations = None
+                print("Điều kiện dừng:")
+                print("1. Sai khác tuyệt đối")
+                print("2. Sai khác tương đối")
+                print("3. Residual điểm bất động")
+                print("4. Đồng thời sai khác tuyệt đối và residual")
+                direct_stop = input("Chọn [4]: ").strip() or "4"
+                stop_mode = {
+                    "1": "absolute", "2": "relative", "3": "residual", "4": "both"
+                }.get(direct_stop)
+                if stop_mode is None:
+                    raise ValueError("Điều kiện dừng không hợp lệ.")
+                residual_tolerance = epsilon
+            precision = read_int("Số chữ số sau dấu phẩy [7] = ", minimum=0, default=7)
+            seidel_fixed_point(
+                b_matrix,
+                d,
+                x0=x0,
+                epsilon=epsilon,
+                max_iter=max_iter,
+                precision=precision,
+                fixed_iterations=fixed_iterations,
+                stop_mode=stop_mode,
+                residual_tolerance=residual_tolerance,
+            )
+            return
+
         n = read_int("Cấp ma trận n = ", minimum=1)
         a = read_matrix(n, n, "A")
         auto_reorder = input(
             "Tự động đổi hàng nếu có lợi? [C/k]: "
         ).strip().lower() not in {"k", "khong", "không", "n", "no"}
         precision = read_int("Số chữ số sau dấu phẩy [7] = ", minimum=0, default=7)
-        DISPLAY_FRACTIONS = input("In phân số gần đúng? [k/C]: ").strip().lower() in {
-            "c",
-            "co",
-            "có",
-            "y",
-            "yes",
-        }
 
         print("Chế độ dừng:")
         print("1. Chặn sai số hậu nghiệm")
@@ -1336,7 +1659,7 @@ def main():
                 residual_tolerance=residual_tolerance,
                 stop_mode=stop_mode,
             )
-        elif choice == "2":
+        elif choice == "4":
             m = read_int("Số vế phải m = ", minimum=1)
             big_b = read_matrix(n, m, "B")
             x0 = read_vector(n, f"x^(0) dùng chung ({n} số, Enter=0): ", default=0.0)
@@ -1352,7 +1675,7 @@ def main():
                 residual_tolerance=residual_tolerance,
                 stop_mode=stop_mode,
             )
-        else:
+        else:  # choice == "3"
             x0 = read_vector(n, f"x^(0) dùng chung ({n} số, Enter=0): ", default=0.0)
             solve_inverse(
                 a,
@@ -1372,4 +1695,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")

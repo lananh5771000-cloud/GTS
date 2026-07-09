@@ -1,6 +1,5 @@
 import contextlib
 import io
-import math
 import unittest
 from unittest.mock import patch
 
@@ -184,6 +183,13 @@ class TestNewtonSystemOrder(unittest.TestCase):
         self.assertFalse(result.converged)
         self.assertEqual(result.status, "numerical_failure")
 
+    def test_fixed_steps_do_not_stop_at_an_early_exact_root(self):
+        result = self.solve(self.x - 2, 0.0, fixed_iterations=4)
+        self.assertEqual(result.status, "fixed_steps")
+        self.assertEqual(len(result.records), 4)
+        self.assertEqual(result.x[0], 2.0)
+        self.assertIn("đúng k=4", result.reason)
+
 
 class TestLinearFixedPoint(unittest.TestCase):
     def test_convergence_initial_solution_relative_residual_and_max_iter(self):
@@ -221,6 +227,64 @@ class TestLinearFixedPoint(unittest.TestCase):
                 np.zeros(2), "inf", 1e-8, 10, 0,
             )
 
+    def test_linear_fixed_steps_do_not_stop_at_initial_solution(self):
+        A = np.eye(2)
+        b = np.array([1.0, -2.0])
+        result = linear_fixed.simple_iteration(
+            A, b, np.zeros((2, 2)), b.copy(), b.copy(), "inf", 1e-9, 20, 5
+        )
+        self.assertEqual(len(result.records), 5)
+        np.testing.assert_array_equal(result.x, b)
+
+        import lapjacobituyentinh as jacobi
+
+        fixed = jacobi.jacobi_solve(
+            A, b, b.copy(), stop_mode="fixed", fixed_steps=5, max_iter=20
+        )
+        self.assertEqual(fixed["status"], "fixed_steps")
+        self.assertEqual(len(fixed["history"]), 6)
+
+    def test_richardson_direct_menu_does_not_request_A_or_b(self):
+        output = io.StringIO()
+        with patch(
+            "builtins.input",
+            side_effect=[
+                "2", "2",       # nhập trực tiếp B,d; n
+                "0, 0", "0, 0",  # B
+                "1, -2",          # d
+                "1",              # chuẩn vô cùng
+                "",               # x^(0)=0
+                "1", "2",        # đúng k bước, k=2
+                "5",              # chữ số hiển thị
+            ],
+        ), contextlib.redirect_stdout(output):
+            linear_fixed.main()
+        text = output.getvalue()
+        self.assertIn("Không yêu cầu nhập A hoặc b", text)
+        self.assertIn("x-Bx-d", text)
+        self.assertNotIn("Nhập ma trận A", text)
+        self.assertNotIn("Nhập vector b", text)
+
+    def test_jacobi_direct_fixed_point_formula_and_history(self):
+        import lapjacobituyentinh as jacobi
+
+        B = np.array([[0.0, 0.5], [0.25, 0.0]])
+        d = np.array([1.0, -1.0])
+        result = jacobi.jacobi_fixed_point(
+            B,
+            d,
+            np.zeros(2),
+            stop_mode="fixed",
+            fixed_steps=3,
+            norm_kind="inf",
+        )
+        self.assertEqual(result["status"], "fixed_steps")
+        self.assertEqual(len(result["history"]), 4)
+        expected = np.zeros(2)
+        for _ in range(3):
+            expected = B @ expected + d
+        np.testing.assert_allclose(result["x"], expected)
+
 
 class TestDirectMainPaths(unittest.TestCase):
     def run_main(self, function, answers):
@@ -232,7 +296,7 @@ class TestDirectMainPaths(unittest.TestCase):
     def test_svd_main_uses_scaled_core(self):
         text = self.run_main(
             svd_module.main,
-            ["2", "2", "1e-100 0", "0 2e-100", "", "", "1e-10", "100", "2", "7"],
+            ["2", "2", "1e-100 0", "0 2e-100", "", "", "", "", "100", "7"],
         )
         self.assertIn("2.000000000000e-100", text)
         self.assertIn("SVD đạt đồng thời", text)

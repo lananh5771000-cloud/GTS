@@ -1,5 +1,7 @@
 import sys
+from exam_format import exam_print as print
 from fractions import Fraction
+from input_utils import MathInputError, parse_exact, split_number_row
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -58,15 +60,10 @@ def input_decimals(prompt, default=7):
 
 def input_matrix_row(prompt, expected_count):
     while True:
-        tokens = input(prompt).split()
-        if len(tokens) != expected_count:
-            print(
-                f"Lỗi: Dòng phải có đúng {expected_count} phần tử. Vui lòng nhập lại."
-            )
-            continue
         try:
-            return [Fraction(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+            tokens = split_number_row(input(prompt), expected_count)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, ZeroDivisionError):
             print(
                 "Lỗi: Chỉ nhập số nguyên, số thập phân hoặc phân số hợp lệ "
                 "(ví dụ 2, 0.25, 1/3)."
@@ -314,3 +311,5 @@ if __name__ == "__main__":
         solve_gauss_jordan()
     except (EOFError, KeyboardInterrupt):
         print("\nĐã kết thúc chương trình.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

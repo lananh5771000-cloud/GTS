@@ -2,9 +2,11 @@ import sympy as sp
 import numpy as np
 import math
 import sys
+from exam_format import exam_print as print
 from truyen_sai_so import propagate_bound, symbolic_derivative_bound
 from dataclasses import dataclass
 from typing import Callable, Literal
+from input_utils import parse_math_expression, parse_real
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -35,6 +37,7 @@ def chord_method(
     max_iter: int = 1000,
     denominator_tolerance: float = 1e-14,
     assumptions_verified: bool = False,
+    fixed_iterations: int | None = None,
 ) -> ChordResult:
     """Hai biến thể dây cung được tách rõ, không dùng lẫn điều kiện hội tụ."""
     if variant not in {"regula_falsi", "fixed_endpoint"}:
@@ -44,17 +47,23 @@ def chord_method(
     if not a < b or epsilon <= 0 or max_iter <= 0 or denominator_tolerance <= 0:
         raise ValueError("Cần a < b và các ngưỡng dương.")
 
+    if fixed_iterations is not None and fixed_iterations < 0:
+        raise ValueError("fixed_iterations phai khong am.")
+
     def value(point: float) -> float:
         result = float(f(point))
         if not math.isfinite(result):
             raise ArithmeticError(f"f({point}) không hữu hạn.")
         return result
 
+    fixed_mode = fixed_iterations is not None
     fa, fb = value(a), value(b)
-    if abs(fa) <= denominator_tolerance:
-        return ChordResult(a, True, assumptions_verified, variant, "Nghiệm ở đầu mút a.", [], abs(fa), 0.0, (a, a))
-    if abs(fb) <= denominator_tolerance:
-        return ChordResult(b, True, assumptions_verified, variant, "Nghiệm ở đầu mút b.", [], abs(fb), 0.0, (b, b))
+    if (fa == 0.0 if fixed_mode else abs(fa) <= denominator_tolerance):
+        exact = fa == 0.0
+        return ChordResult(a, True, exact, variant, "Đầu mút a là nghiệm chính xác." if exact else "Đầu mút a chỉ đạt ngưỡng phần dư.", [], abs(fa), 0.0 if exact else None, (a, a) if exact else (a, b))
+    if (fb == 0.0 if fixed_mode else abs(fb) <= denominator_tolerance):
+        exact = fb == 0.0
+        return ChordResult(b, True, exact, variant, "Đầu mút b là nghiệm chính xác." if exact else "Đầu mút b chỉ đạt ngưỡng phần dư.", [], abs(fb), 0.0 if exact else None, (b, b) if exact else (a, b))
     if fa * fb > 0:
         raise ValueError("[a,b] không phải khoảng đổi dấu.")
     if m1 is not None and (not math.isfinite(m1) or m1 <= 0):
@@ -77,7 +86,9 @@ def chord_method(
 
     records: list[tuple[int, float, float, float]] = []
     root = (a + b) / 2.0
-    for k in range(1, max_iter + 1):
+    error = None
+    loop_limit = fixed_iterations if fixed_iterations is not None else max_iter
+    for k in range(1, loop_limit + 1):
         if variant == "regula_falsi":
             denominator = fb - fa
             scale = max(1.0, abs(fa), abs(fb))
@@ -85,6 +96,8 @@ def chord_method(
                 return ChordResult(root, False, False, variant, "Mẫu số dây cung gần 0.", records, abs(value(root)), None, (a, b))
             root = (a * fb - b * fa) / denominator
         else:
+            if moving is None or fixed is None or f_fixed is None:
+                raise ArithmeticError("Chua chon duoc dau co dinh cho phuong phap day cung.")
             fm = value(moving)
             denominator = fm - f_fixed
             scale = max(1.0, abs(fm), abs(f_fixed))
@@ -96,18 +109,28 @@ def chord_method(
         fr = value(root)
         error = abs(fr) / m1 if m1 is not None else None
         records.append((k, root, fr, error if error is not None else math.nan))
-        if abs(fr) <= denominator_tolerance or (error is not None and error <= epsilon):
-            certified = assumptions_verified and (error is not None or abs(fr) == 0.0)
+        if fixed_iterations is None and (
+            abs(fr) <= denominator_tolerance or (error is not None and error <= epsilon)
+        ):
+            certified = fr == 0.0 or (assumptions_verified and error is not None)
             reason = "Đạt chặn hậu nghiệm |f(x_k)|/m1." if error is not None else "Phần dư bằng 0 trong số học máy."
             if not certified:
                 reason += " Kết quả chưa được chứng nhận do giả thiết chỉ kiểm tra số."
             return ChordResult(root, True, certified, variant, reason, records, abs(fr), error, (a, b))
+        if fixed_iterations is not None and fr == 0.0:
+            return ChordResult(root, True, True, variant, "Nghiem chinh xac.", records, abs(fr), 0.0, (root, root))
         if fa * fr <= 0:
             b, fb = root, fr
         else:
             a, fa = root, fr
         if variant == "fixed_endpoint":
             moving = root
+    if fixed_iterations is not None:
+        reason = (
+            f"Da thuc hien dung k={fixed_iterations} buoc day cung; "
+            "chua dung tieu chuan epsilon de chung nhan."
+        )
+        return ChordResult(root, True, assumptions_verified and error is not None and error <= epsilon, variant, reason, records, abs(value(root)), records[-1][3] if records and math.isfinite(records[-1][3]) else None, (a, b))
     return ChordResult(root, False, False, variant, "Đã đạt max_iter.", records, abs(value(root)), records[-1][3] if records and math.isfinite(records[-1][3]) else None, (a, b))
 
 
@@ -160,7 +183,7 @@ def print_custom_algorithm(
 
     print("6. Tiến trình lặp:")
     print(
-        "   - Sử dụng công thức: x_k+1 = x_k - [f(x_k) * (x_k - d)] / [f(x_k) - f(d)]"
+        "   - Sử dụng công thức: x⁽ᵏ⁺¹⁾ = x⁽ᵏ⁾ − f(x⁽ᵏ⁾)(x⁽ᵏ⁾ − d)/[f(x⁽ᵏ⁾) − f(d)]"
     )
     print("7. Kết luận:")
     print(f"   - Sau {final_n} bước lặp, điều kiện dừng đã được thỏa mãn.")
@@ -172,7 +195,7 @@ def secant_method(max_iter=1000):
     print("=== GIẢI PHƯƠNG TRÌNH BẰNG PHƯƠNG PHÁP DÂY CUNG ===\n")
     print("Input: f(x), khoảng phân ly, điểm mốc và điều kiện dừng.")
     print("Output: bảng lặp, nghiệm gần đúng và đánh giá sai số.")
-    print("Công thức: x_(k+1)=x_k-f(x_k)(x_k-d)/(f(x_k)-f(d)).\n")
+    print("Công thức: x⁽ᵏ⁺¹⁾ = x⁽ᵏ⁾ − f(x⁽ᵏ⁾)(x⁽ᵏ⁾−d)/[f(x⁽ᵏ⁾)−f(d)].\n")
     x, pi_sym, e_sym = sp.symbols("x pi e")
 
     # 1. Nhập phương trình gốc
@@ -193,7 +216,7 @@ def secant_method(max_iter=1000):
     if use_G == "y":
         G_name = input("Nhập ký hiệu của hàm đó (vd: V, S, F...): ").strip() or "G"
         g_input = input(f"Nhập biểu thức {G_name}(x) (vd: 1/6 * pi * x**3): ")
-        G_expr_raw = sp.sympify(g_input, locals={"pi": pi_sym, "e": e_sym})
+        G_expr_raw = parse_math_expression(g_input, {"x": x, "pi": pi_sym, "e": e_sym})
 
     # 3. Xử lý hằng số Pi, E
     combined_input = f_input + " " + g_input
@@ -216,7 +239,7 @@ def secant_method(max_iter=1000):
 
     # 4. Thay số và thiết lập hàm f(x)
     try:
-        f_expr = sp.sympify(f_input, locals={"pi": pi_val, "e": e_val})
+        f_expr = parse_math_expression(f_input, {"x": x, "pi": sp.Float(pi_val), "e": sp.Float(e_val)})
         f_func = sp.lambdify(x, f_expr, "numpy")
     except Exception as e:
         print("Lỗi cú pháp hàm số:", e)
@@ -281,8 +304,8 @@ def secant_method(max_iter=1000):
 
     # --- BƯỚC 1: KHOẢNG CÁCH LY VÀ XÉT DẤU ---
     print("\n--- BƯỚC 1: KHOẢNG CÁCH LY VÀ XÉT DẤU ---")
-    a = float(input("Nhập cận dưới a = "))
-    b = float(input("Nhập cận trên b = "))
+    a = parse_real(input("Nhập cận dưới a = "))
+    b = parse_real(input("Nhập cận trên b = "))
 
     f_prime = sp.diff(f_expr, x)
     f_double_prime = sp.diff(f_prime, x)
@@ -356,10 +379,10 @@ def secant_method(max_iter=1000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_abs"
         elif choice == "2":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -370,10 +393,10 @@ def secant_method(max_iter=1000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập sai số tuyệt đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
         elif choice == "2":
-            target_val = float(input("Nhập sai số tương đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
             cond_type = "x_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -383,9 +406,9 @@ def secant_method(max_iter=1000):
     print("\n--- BƯỚC 4: QUÁ TRÌNH LẶP ---")
 
     if use_G == "y":
-        header = f"{'k':<3} | {'x_k':<15} | {'f(x_k)':<15} | {'E_x':<15} | {G_name:<15} | {'B_G/XP_G':<15} | {'B_G tương đối':<15}"
+        header = f"{'k':<3} | {'x⁽ᵏ⁾':<15} | {'f(x⁽ᵏ⁾)':<15} | {'Eₓ':<15} | {G_name:<15} | {'Bᴳ/XPᴳ':<15} | {'Bᴳ tương đối':<15}"
     else:
-        header = f"{'k':<3} | {'x_k':<15} | {'f(x_k)':<15} | {'\u0394x (Tuyệt đối)':<18} | {'\u03b4x (Tương đối)':<18}"
+        header = f"{'k':<3} | {'x⁽ᵏ⁾':<15} | {'f(x⁽ᵏ⁾)':<15} | {'Δx (Tuyệt đối)':<18} | {'δx (Tương đối)':<18}"
 
     print("-" * len(header))
     print(header)
@@ -401,7 +424,7 @@ def secant_method(max_iter=1000):
             return
         fxk = float(f_expr.subs(x, xk))
         if not math.isfinite(fxk):
-            print("[X] f(x_k) không hữu hạn; dừng.")
+            print("[X] f(x⁽ᵏ⁾) không hữu hạn; dừng.")
             return
 
         # Chặn hậu nghiệm theo phần dư, chỉ đúng khi m1 đã được bảo đảm.
@@ -458,7 +481,7 @@ def secant_method(max_iter=1000):
         # Công thức lặp dây cung (1 đầu mút d cố định)
         denominator = fxk - fd
         if abs(denominator) <= 1e-14 * max(1.0, abs(fxk), abs(fd)):
-            print("\n[!] LỖI: Chia cho 0 do f(x_k) - f(d) = 0. Thuật toán dừng sớm.")
+            print("\n[!] LỖI: Chia cho 0 do f(x⁽ᵏ⁾) − f(d) = 0. Thuật toán dừng sớm.")
             break
         x_next = xk - (fxk * (xk - d)) / denominator
         if not math.isfinite(x_next) or not a <= x_next <= b:
@@ -484,4 +507,9 @@ def secant_method(max_iter=1000):
 
 
 if __name__ == "__main__":
-    secant_method()
+    try:
+        secant_method()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

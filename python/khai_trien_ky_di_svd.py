@@ -18,9 +18,12 @@ from __future__ import annotations
 import math
 import sys
 from dataclasses import dataclass
-from fractions import Fraction
+from input_utils import MathInputError, parse_real, split_number_row
+from stopping_utils import scaled_tolerance
 
 import numpy as np
+
+from exam_format import exam_print as print, indexed
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -41,7 +44,7 @@ def parse_number(token: str) -> float:
     token = token.strip().replace("−", "-")
     if "," in token and "." not in token:
         token = token.replace(",", ".")
-    value = float(Fraction(token))
+    value = parse_real(token)
     if not math.isfinite(value):
         raise ValueError
     return value
@@ -78,16 +81,10 @@ def input_positive(prompt: str, default: float | None = None) -> float:
 
 def input_row(prompt: str, length: int) -> list[float]:
     while True:
-        raw = input(prompt)
-        for symbol in "[](){};":
-            raw = raw.replace(symbol, " ")
-        tokens = raw.split()
-        if len(tokens) != length:
-            print(f"  Lỗi: phải nhập đúng {length} số, cách nhau bằng dấu cách.")
-            continue
         try:
+            tokens = split_number_row(input(prompt), length)
             return [parse_number(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+        except (MathInputError, ValueError, ZeroDivisionError):
             print("  Lỗi: dữ liệu không hợp lệ; có thể nhập số thập phân hoặc phân số a/b.")
 
 
@@ -131,6 +128,8 @@ def number(value: float, decimals: int) -> str:
 
 def matrix_lines(matrix: np.ndarray, decimals: int) -> list[str]:
     matrix = np.atleast_2d(np.asarray(matrix, dtype=float))
+    if matrix.shape[0] == 0 or matrix.shape[1] == 0:
+        return [f"[ ma trận rỗng {matrix.shape[0]}×{matrix.shape[1]} ]"]
     cells = [[number(value, decimals) for value in row] for row in matrix]
     widths = [max(len(cells[i][j]) for i in range(len(cells))) for j in range(len(cells[0]))]
     result: list[str] = []
@@ -171,6 +170,13 @@ def section(title: str) -> None:
 
 def scientific(value: float) -> str:
     return f"{float(value):.7e}"
+
+
+def singular_text(value: float, decimals: int) -> str:
+    value = float(value)
+    if value != 0.0 and (abs(value) < 10.0 ** (-decimals) or abs(value) >= 10.0 ** (decimals + 1)):
+        return f"{value:.12e}"
+    return number(value, decimals)
 
 
 # =============================================================================
@@ -241,6 +247,8 @@ class Iteration:
     vector: np.ndarray
     delta: float
     residual: float
+    lambda_delta: float = math.inf
+    relative_residual: float = math.inf
 
 
 @dataclass
@@ -250,6 +258,12 @@ class PowerResult:
     history: list[Iteration]
     converged: bool
     stop_reason: str
+    initial_vector: np.ndarray | None = None
+    raw_vector: np.ndarray | None = None
+    relative_residual: float = math.inf
+    stagnated: bool = False
+    max_iter_reached: bool = False
+    fixed_steps_completed: bool = False
 
 
 @dataclass
@@ -271,6 +285,15 @@ class SVDResult:
     reconstruction_tolerance: float = 0.0
     scale_factor: float = 1.0
     power_results: list[PowerResult] | None = None
+    deflation_matrices: list[np.ndarray] | None = None
+    internal_power_converged: bool = True
+    singular_triplet_residual_ok: bool = True
+    orthogonality_ok: bool = True
+    reconstruction_ok: bool = True
+    final_accepted: bool = True
+    final_absolute_tolerance: float = 0.0
+    final_relative_tolerance: float = 0.0
+    singular_triplet_tolerance: float = 0.0
 
 
 def power_method_symmetric(
@@ -310,16 +333,33 @@ def power_method_symmetric(
         if image_norm > np.finfo(float).tiny * max(scale, np.finfo(float).tiny):
             viable.append((image_norm, candidate))
     x = max(viable, key=lambda item: item[0])[1] if viable else independent_start(initial, locked_vectors)
+    initial_used = x.copy()
     history: list[Iteration] = []
     limit = fixed_steps if fixed_steps > 0 else maximum_iterations
     matrix_scale = float(np.linalg.norm(matrix, "fro"))
 
     # Nếu phần ma trận còn lại bằng 0 thì trị riêng tiếp theo bằng 0.
     if matrix_scale == 0.0:
-        return PowerResult(0.0, x, [], True, "ma trận còn lại bằng 0")
+        return PowerResult(
+            0.0, x, [], True, "ma trận còn lại bằng 0",
+            initial_vector=initial_used, raw_vector=np.zeros_like(x),
+        )
 
     converged = False
     stop_reason = "đã thực hiện đủ số vòng lặp đề bài yêu cầu"
+    raw_y = np.zeros_like(x)
+    stagnation_limit = 8
+    stagnation_count = 0
+    no_improve_limit = 12
+    no_improve_count = 0
+    sign_flip_count = 0
+    stagnated = False
+    max_iter_reached = False
+    best_relative_residual = math.inf
+    previous_eigenvalue: float | None = None
+    final_relative_residual = math.inf
+    stagnation_tol = max(100.0 * size * np.finfo(float).eps, 0.1 * epsilon)
+    lambda_tol = max(100.0 * size * np.finfo(float).eps, 0.1 * epsilon)
     for k in range(1, limit + 1):
         y = matrix @ x
         y = orthogonalize(y, locked_vectors)
@@ -327,36 +367,85 @@ def power_method_symmetric(
             raise ArithmeticError(
                 "vector khởi đầu rơi vào không gian riêng ứng với trị riêng 0; hãy đổi vector đầu"
             )
+        raw_y = y.copy()
         x_new = normalize(y)
-        if float(x_new @ x) < 0.0:
+        raw_alignment = float(x_new @ x)
+        if raw_alignment < 0.0:
+            sign_flip_count += 1
             x_new = -x_new
+        else:
+            sign_flip_count = 0
 
         eigenvalue = float(x_new @ matrix @ x_new)
         residual = float(np.linalg.norm(matrix @ x_new - eigenvalue * x_new, 2))
+        lambda_delta = (
+            math.inf
+            if previous_eigenvalue is None
+            else abs(eigenvalue - previous_eigenvalue) / max(1.0, abs(eigenvalue))
+        )
         delta = min(
             float(np.linalg.norm(x_new - x, 2)),
             float(np.linalg.norm(x_new + x, 2)),
         )
-        history.append(Iteration(k, eigenvalue, x_new.copy(), delta, residual))
-        x = x_new
-
         relative_residual = residual / max(
-            matrix_scale + abs(eigenvalue), np.finfo(float).tiny
+            1.0, matrix_scale, abs(eigenvalue), np.finfo(float).tiny
         )
+        final_relative_residual = relative_residual
+        history.append(Iteration(k, eigenvalue, x_new.copy(), delta, residual, lambda_delta, relative_residual))
+        x = x_new
+        previous_eigenvalue = eigenvalue
         if fixed_steps == 0 and relative_residual <= epsilon:
             converged = True
             stop_reason = f"||Bv - λv||₂ <= ε = {epsilon:.3e}"
             break
+        if fixed_steps == 0:
+            if relative_residual < best_relative_residual * (1.0 - 1e-3):
+                best_relative_residual = relative_residual
+                no_improve_count = 0
+            else:
+                no_improve_count += 1
+            if delta <= stagnation_tol and lambda_delta <= lambda_tol:
+                stagnation_count += 1
+            else:
+                stagnation_count = 0
+            if (
+                stagnation_count >= stagnation_limit
+                or no_improve_count >= no_improve_limit
+                or sign_flip_count >= stagnation_limit
+            ):
+                stagnated = True
+                converged = relative_residual <= max(epsilon, 100.0 * size * np.finfo(float).eps)
+                if stagnation_count >= stagnation_limit:
+                    detail = "vector va lambda gan nhu khong doi"
+                elif sign_flip_count >= stagnation_limit:
+                    detail = "phat hien dao dong dau lap lai"
+                else:
+                    detail = "residual khong cai thien qua nhieu buoc"
+                stop_reason = (
+                    "vector lặp không đổi thêm đáng kể qua nhiều bước; "
+                    "dừng sớm và dùng kiểm tra residual cuối để chứng nhận"
+                )
+                stop_reason = f"{detail}; dung som an toan va dung kiem tra cuoi de chung nhan"
+                break
 
     if not history:
         raise ArithmeticError("không tạo được bước lặp nào")
     if fixed_steps > 0:
-        last_scale = max(matrix_scale + abs(history[-1].eigenvalue), np.finfo(float).tiny)
-        converged = history[-1].residual / last_scale <= epsilon
+        last_scale = max(1.0, matrix_scale, abs(history[-1].eigenvalue), np.finfo(float).tiny)
+        final_relative_residual = history[-1].residual / last_scale
+        converged = final_relative_residual <= epsilon
     elif not converged:
+        max_iter_reached = len(history) >= maximum_iterations
         stop_reason = f"đã đạt k_max = {maximum_iterations} nhưng chưa đạt ε"
     last = history[-1]
-    return PowerResult(last.eigenvalue, last.vector, history, converged, stop_reason)
+    return PowerResult(
+        last.eigenvalue, last.vector, history, converged, stop_reason,
+        initial_vector=initial_used, raw_vector=raw_y,
+        relative_residual=final_relative_residual,
+        stagnated=stagnated,
+        max_iter_reached=max_iter_reached,
+        fixed_steps_completed=fixed_steps > 0 and len(history) >= fixed_steps,
+    )
 
 
 def deflate_symmetric(matrix: np.ndarray, eigenvalue: float, vector: np.ndarray) -> np.ndarray:
@@ -365,6 +454,30 @@ def deflate_symmetric(matrix: np.ndarray, eigenvalue: float, vector: np.ndarray)
     tolerance = 100.0 * np.finfo(float).eps * float(np.linalg.norm(matrix, "fro"))
     result[np.abs(result) <= tolerance] = 0.0
     return result
+
+
+def final_svd_tolerances(
+    epsilon: float,
+    rows: int,
+    columns: int,
+    alpha: float,
+    scaled_norm: float,
+    *,
+    multiplier: float = 10000.0,
+) -> tuple[float, float]:
+    norm_a = abs(alpha) * max(0.0, float(scaled_norm))
+    if not math.isfinite(norm_a):
+        norm_a = sys.float_info.max
+    absolute = scaled_tolerance(
+        epsilon,
+        max(rows, columns),
+        max(1.0, norm_a),
+        multiplier=multiplier,
+    )
+    relative = absolute / max(1.0, norm_a)
+    relative = max(relative, 10.0 * epsilon)
+    absolute = max(absolute, relative * max(1.0, norm_a))
+    return absolute, relative
 
 
 def svd_power(
@@ -407,17 +520,12 @@ def svd_power(
     alpha = float(np.max(np.abs(A)))
     eps_machine = np.finfo(float).eps
     safe_min = np.finfo(float).tiny
-    iter_tol = epsilon if iteration_tolerance is None else iteration_tolerance
-    orth_tol = (
-        max(100.0 * max(m, n) * eps_machine, 10.0 * epsilon)
-        if orthogonality_tolerance is None
-        else orthogonality_tolerance
-    )
-    reconstruct_tol = (
-        max(100.0 * max(m, n) * eps_machine, 10.0 * epsilon)
-        if reconstruction_tolerance is None
-        else reconstruction_tolerance
-    )
+    iter_tol_input = epsilon if iteration_tolerance is None else iteration_tolerance
+    iter_tol = max(iter_tol_input, 100.0 * max(m, n) * eps_machine)
+    final_abs_tol, final_rel_tol = final_svd_tolerances(epsilon, m, n, max(alpha, 1.0), 1.0)
+    triplet_tol = max(iter_tol, final_rel_tol)
+    orth_tol = final_rel_tol if orthogonality_tolerance is None else orthogonality_tolerance
+    reconstruct_tol = final_rel_tol if reconstruction_tolerance is None else reconstruction_tolerance
 
     if alpha == 0.0:
         if full_matrices:
@@ -444,10 +552,25 @@ def svd_power(
             reconstruction_tolerance=reconstruct_tol,
             scale_factor=alpha,
             power_results=[],
+            deflation_matrices=[np.zeros((n, n))],
+            internal_power_converged=True,
+            singular_triplet_residual_ok=True,
+            orthogonality_ok=True,
+            reconstruction_ok=True,
+            final_accepted=True,
+            final_absolute_tolerance=final_abs_tol,
+            final_relative_tolerance=final_rel_tol,
+            singular_triplet_tolerance=triplet_tol,
         )
 
     A_scaled = A / alpha
+    scaled_norm = float(np.linalg.norm(A_scaled, "fro"))
+    final_abs_tol, final_rel_tol = final_svd_tolerances(epsilon, m, n, alpha, scaled_norm)
+    triplet_tol = max(iter_tol, final_rel_tol)
+    orth_tol = final_rel_tol if orthogonality_tolerance is None else orthogonality_tolerance
+    reconstruct_tol = final_rel_tol if reconstruction_tolerance is None else reconstruction_tolerance
     B = A_scaled.T @ A_scaled
+    deflation_matrices = [B.copy()]
     locked: list[np.ndarray] = []
     pairs: list[tuple[float, np.ndarray, PowerResult]] = []
     warnings: list[str] = []
@@ -469,6 +592,11 @@ def svd_power(
             break
         locked.append(v)
         pairs.append((sigma_scaled, v, power))
+        # Xuống thang Hotelling thực sự trên ma trận đang lặp.  Việc khóa
+        # vector chỉ là lớp bảo vệ số; B_i vẫn được cập nhật đúng công thức.
+        deflation_value = max(float(power.eigenvalue), 0.0)
+        B = deflate_symmetric(B, deflation_value, v)
+        deflation_matrices.append(B.copy())
 
     pairs.sort(key=lambda item: item[0], reverse=True)
     sigma_max_scaled = pairs[0][0] if pairs else 0.0
@@ -489,13 +617,13 @@ def svd_power(
         for sigma, v, _power in resolved_pairs
     ]
     relation_residuals: list[tuple[float, float]] = []
-    scaled_norm = float(np.linalg.norm(A_scaled, "fro"))
     for sigma, u, v in zip(singular_scaled, U_columns, V_columns):
         left_abs = float(np.linalg.norm(A_scaled @ v - sigma * u, 2))
         right_abs = float(np.linalg.norm(A_scaled.T @ u - sigma * v, 2))
+        denominator = max(1.0, scaled_norm, sigma)
         relation_residuals.append((
-            left_abs / max(scaled_norm * np.linalg.norm(v) + sigma * np.linalg.norm(u), safe_min),
-            right_abs / max(scaled_norm * np.linalg.norm(u) + sigma * np.linalg.norm(v), safe_min),
+            left_abs / max(denominator, safe_min),
+            right_abs / max(denominator, safe_min),
         ))
 
     if full_matrices:
@@ -523,24 +651,35 @@ def svd_power(
     relative_error = scaled_error / max(float(np.linalg.norm(A_scaled, "fro")), safe_min)
     left_error = float(np.linalg.norm(U.T @ U - np.eye(U.shape[1]), "fro"))
     right_error = float(np.linalg.norm(V.T @ V - np.eye(V.shape[1]), "fro"))
-    required_triplets_converged = all(item[2].converged for item in resolved_pairs)
+    internal_power_converged = all(item[2].converged for item in resolved_pairs)
     triplets_ok = all(
-        left <= iter_tol and right <= iter_tol
+        left <= triplet_tol and right <= triplet_tol
         for left, right in relation_residuals
     )
-    converged = bool(
-        required_triplets_converged
-        and triplets_ok
-        and left_error <= orth_tol
-        and right_error <= orth_tol
+    orthogonality_ok = bool(left_error <= orth_tol and right_error <= orth_tol)
+    reconstruction_ok = bool(
+        absolute_error <= final_abs_tol
         and relative_error <= reconstruct_tol
+        and relative_error <= final_rel_tol
+    )
+    final_accepted = bool(
+        triplets_ok
+        and orthogonality_ok
+        and reconstruction_ok
     )
     if rank < min(m, n):
         warnings.append(
             "Hạng số theo tolerance bằng "
             f"{rank} (rank_tol={rank_tol_original:.3e}); đây không phải tuyên bố hạng toán học."
         )
-    if not converged:
+    if final_accepted and not internal_power_converged:
+        warnings.append(
+            "Vòng lặp nội bộ đã chạm giới hạn bước, nhưng phân tích cuối vượt qua "
+            "kiểm tra nên kết quả được chấp nhận."
+        )
+    if any(power.stagnated for _sigma, _v, power in resolved_pairs) and not final_accepted:
+        warnings.append("Dung do dinh tre, ket qua chua dat kiem tra cuoi.")
+    if not final_accepted:
         warnings.append(
             "SVD chưa đạt đồng thời điều kiện bộ ba kỳ dị, trực giao và tái tạo."
         )
@@ -554,7 +693,7 @@ def svd_power(
         left_orthogonality_error=left_error,
         right_orthogonality_error=right_error,
         relation_residuals=relation_residuals,
-        converged=converged,
+        converged=final_accepted,
         warnings=warnings,
         rank_tolerance=rank_tol_original,
         iteration_tolerance=iter_tol,
@@ -562,6 +701,15 @@ def svd_power(
         reconstruction_tolerance=reconstruct_tol,
         scale_factor=alpha,
         power_results=[item[2] for item in resolved_pairs],
+        deflation_matrices=deflation_matrices,
+        internal_power_converged=internal_power_converged,
+        singular_triplet_residual_ok=triplets_ok,
+        orthogonality_ok=orthogonality_ok,
+        reconstruction_ok=reconstruction_ok,
+        final_accepted=final_accepted,
+        final_absolute_tolerance=final_abs_tol,
+        final_relative_tolerance=final_rel_tol,
+        singular_triplet_tolerance=triplet_tol,
     )
 
 
@@ -658,7 +806,12 @@ def print_stage(
     print(f"  ||B_{stage - 1}v_{stage} - λ_{stage}v_{stage}||₂ = {scientific(residual)}")
     print(f"  σ_{stage} = sqrt(λ_{stage}) ≈ {number(sigma, decimals)}")
     print(f"  Dừng vì {result.stop_reason}.")
-    if result.converged:
+    if result.final_accepted:
+        if not result.internal_power_converged:
+            print(
+                "KET LUAN BO SUNG: Ket qua SVD cuoi cung duoc chap nhan; "
+                "mot vong lap noi bo cham gioi han buoc nhung cac kiem tra cuoi deu dat."
+            )
         print("  Đánh giá: cặp trị riêng đạt sai số ε.")
     else:
         print("  Lưu ý: chưa đạt ε; nếu đề không cố định k thì cần tăng số vòng lặp.")
@@ -727,51 +880,250 @@ def print_final(
     print_matrix("V_r", V, decimals)
     reconstruction = U @ Sigma @ V.T
     print("\nMa trận tái tạo từ SVD:")
-    print_matrix("U_r Σ_r V_r^T", reconstruction, decimals)
+    print_matrix("UᵣΣᵣVᵣᵀ", reconstruction, decimals)
     absolute_error = float(np.linalg.norm(A - reconstruction, "fro"))
     norm_a = float(np.linalg.norm(A, "fro"))
     relative_error = absolute_error / norm_a if norm_a > 0.0 else absolute_error
-    print(f"\n||A-U_rΣ_rV_r^T||_F = {scientific(absolute_error)}")
+    print(f"\n‖A − UᵣΣᵣVᵣᵀ‖ꜰ = {scientific(absolute_error)}")
     print(f"Sai số tái tạo tương đối = {scientific(relative_error)}")
     print("\nKiểm tra trực chuẩn:")
-    print(f"  ||U_r^T U_r-I||_F = {scientific(np.linalg.norm(U.T @ U - np.eye(rank), 'fro'))}")
-    print(f"  ||V_r^T V_r-I||_F = {scientific(np.linalg.norm(V.T @ V - np.eye(rank), 'fro'))}")
+    print(f"  ‖UᵣᵀUᵣ − I‖ꜰ = {scientific(np.linalg.norm(U.T @ U - np.eye(rank), 'fro'))}")
+    print(f"  ‖VᵣᵀVᵣ − I‖ꜰ = {scientific(np.linalg.norm(V.T @ V - np.eye(rank), 'fro'))}")
     print("\nKiểm tra từng cặp kỳ dị:")
     for i, sigma in enumerate(np.diag(Sigma)):
         left = np.linalg.norm(A @ V[:, i] - sigma * U[:, i], 2)
         right = np.linalg.norm(A.T @ U[:, i] - sigma * V[:, i], 2)
-        print(f"  i={i + 1}: ||Av_i-sigma_i u_i||2={scientific(left)}, ||A^T u_i-sigma_i v_i||2={scientific(right)}")
+        ui, vi, sigma_name = indexed("u", i + 1), indexed("v", i + 1), indexed("σ", i + 1)
+        print(f"  i = {i + 1}: ‖A{vi} − {sigma_name}{ui}‖₂ = {scientific(left)}, ‖Aᵀ{ui} − {sigma_name}{vi}‖₂ = {scientific(right)}")
     print("\nKẾT LUẬN ĐỂ CHÉP VÀO BÀI:")
     print("  Các giá trị kỳ dị của A là:")
-    print("  " + ", ".join(f"σ_{i + 1} ≈ {number(value, decimals)}" for i, value in enumerate(singular_values)))
-    print("  Các vector v_i ở từng bước đều đã được đưa về chuẩn 2 bằng 1.")
-    print("  Mọi ma trận B_i và vector dùng để xuống thang đã được ghi ở trên.")
+    print("  " + ", ".join(f"{indexed('σ', i + 1)} ≈ {number(value, decimals)}" for i, value in enumerate(singular_values)))
+    print("  Các vector vᵢ ở từng bước đều đã được đưa về chuẩn 2 bằng 1.")
+    print("  Mọi ma trận Bᵢ và vector dùng để xuống thang đã được ghi ở trên.")
 
 
 # =============================================================================
 # CHƯƠNG TRÌNH CHÍNH
 # =============================================================================
 
-def print_svd_result(A: np.ndarray, result: SVDResult, decimals: int, count: int | None = None) -> None:
+def print_deflation_history(A: np.ndarray, result: SVDResult, decimals: int) -> None:
+    """In B₀,…,Bᵣ của phép xuống thang thật sự đã dùng trong lõi."""
+    matrices = result.deflation_matrices or []
+    powers = result.power_results or []
+    if not matrices:
+        return
+    section("C. LŨY THỪA VÀ CÁC MA TRẬN SAU MỖI BƯỚC XUỐNG THANG")
+    print("Lõi tính trên Â=A/α để tránh tràn số; Bᵢ dưới đây được khôi phục về thang AᵀA.")
+    square_scale = result.scale_factor * result.scale_factor
+    can_unscale = math.isfinite(square_scale) and all(
+        np.all(np.isfinite(matrix * square_scale)) for matrix in matrices
+    )
+    if not can_unscale:
+        print("α² vượt miền số máy; vì vậy in B̂ᵢ=Bᵢ/α² và ghi rõ hệ số thang.")
+        square_scale = 1.0
+    print_matrix("B_0=A^T A" if can_unscale else "B_hat_0", matrices[0] * square_scale, decimals)
+    for index, power in enumerate(powers, start=1):
+        if index >= len(matrices):
+            break
+        print(f"\n--- Bước xuống thang {index} ---")
+        if power.initial_vector is not None:
+            print_vector(f"v_{index}^(0)", power.initial_vector, decimals, horizontal=True)
+        print_iteration_table(power, decimals)
+        if power.raw_vector is not None:
+            print_vector(f"z_{index} trước chuẩn hóa", power.raw_vector, decimals, horizontal=True)
+            print(f"  ||z_{index}||₂={np.linalg.norm(power.raw_vector):.{decimals}e}")
+        vector = power.eigenvector
+        eigenvalue = power.eigenvalue * (
+            result.scale_factor * result.scale_factor if can_unscale else 1.0
+        )
+        sigma = result.singular_values[index - 1]
+        print(f"  λ_{index}={eigenvalue:.{decimals}e}")
+        print_vector(f"v_{index} sau chuẩn hóa", vector, decimals, horizontal=True)
+        print(f"  ||v_{index}||₂={np.linalg.norm(vector):.{decimals}f}")
+        print(f"  σ_{index}=√max(λ_{index},0)={sigma:.{decimals}f}")
+        if sigma > result.rank_tolerance:
+            left = A @ vector / sigma
+            print_vector(f"u_{index}=Av_{index}/σ_{index}", left, decimals, horizontal=True)
+        print(
+            f"  B_{index}=B_{index - 1}-λ_{index}v_{index}v_{index}^T"
+            if can_unscale
+            else f"  B_hat_{index}=B_hat_{index - 1}-λ_hat_{index}v_{index}v_{index}^T"
+        )
+        print_matrix(
+            f"B_{index}" if can_unscale else f"B_hat_{index}",
+            matrices[index] * square_scale,
+            decimals,
+        )
+
+
+def _svd_display_parts(
+    A: np.ndarray,
+    result: SVDResult,
+    form: str | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str]:
+    """Trả về U, Σ, Vᵀ đúng dạng cần in mà không làm đổi dữ liệu tính toán."""
+    m, n = A.shape
+    if form is None:
+        form = "full" if result.U.shape == (m, m) and result.Vt.shape == (n, n) else "reduced"
+    if form not in {"reduced", "full", "economy"}:
+        raise ValueError("form phải là 'reduced', 'full' hoặc 'economy'.")
+    if form == "full":
+        U_view, Vt_view = result.U, result.Vt
+        Sigma = np.zeros((m, n))
+        label = "đầy đủ"
+        formula = "A ≈ UΣVᵀ"
+    elif form == "economy":
+        p = min(m, n)
+        U_view, Vt_view = result.U[:, :p], result.Vt[:p, :]
+        Sigma = np.zeros((p, p))
+        label = "mỏng với min(m,n) bộ ba"
+        formula = "A ≈ UΣVᵀ"
+    else:
+        U_view, Vt_view = result.U, result.Vt
+        Sigma = np.zeros((result.rank, result.rank))
+        label = "rút gọn theo hạng số r"
+        formula = "A ≈ UᵣΣᵣVᵣᵀ"
+    for i, sigma in enumerate(result.singular_values[: min(Sigma.shape)]):
+        Sigma[i, i] = sigma
+    return U_view, Sigma, Vt_view, label, formula
+
+
+def _print_svd_exam(
+    A: np.ndarray,
+    result: SVDResult,
+    decimals: int,
+    count: int | None,
+    form: str | None,
+) -> None:
+    """Bản để chép bài thi: chỉ in công thức, kết quả và sai số kiểm tra."""
     section("D. KẾT QUẢ SVD VÀ KIỂM TRA")
+    U_view, Sigma, Vt_view, label, formula = _svd_display_parts(A, result, form)
     shown = len(result.singular_values) if count is None else min(count, len(result.singular_values))
-    print(f"Hệ số đổi thang alpha=max|a_ij|={result.scale_factor:.7e}.")
+
+    print("Các giá trị kỳ dị thu được:")
+    for i, sigma in enumerate(result.singular_values[:shown], start=1):
+        print(f"  {indexed('σ', i)} ≈ {singular_text(sigma, decimals)}")
+
+    print(f"\nDạng SVD dùng để trình bày: {label}.")
+    print(f"{formula}")
+    print(f"Kích thước: U={U_view.shape}, Σ={Sigma.shape}, Vᵀ={Vt_view.shape}.")
+    print_matrix("Uᵣ" if form != "full" else "U", U_view, decimals)
+    print_matrix("Σᵣ" if form != "full" else "Σ", Sigma, decimals)
+    print_matrix("Vᵣᵀ" if form != "full" else "Vᵀ", Vt_view, decimals)
+
+    reconstruction = U_view @ Sigma @ Vt_view
+    print("\nMa trận tái tạo từ phân tích SVD:")
+    print_matrix("UᵣΣᵣVᵣᵀ" if form != "full" else "UΣVᵀ", reconstruction, decimals)
+
+    print("\nKiểm tra lại:")
+    print(f"  ‖A − UᵣΣᵣVᵣᵀ‖ꜰ ≈ {scientific(result.reconstruction_error)}")
+    print(f"  Sai số tái tạo tương đối ≈ {scientific(result.relative_reconstruction_error)}")
+    print(f"  ‖UᵣᵀUᵣ − I‖ꜰ ≈ {scientific(result.left_orthogonality_error)}")
+    print(f"  ‖VᵣᵀVᵣ − I‖ꜰ ≈ {scientific(result.right_orthogonality_error)}")
+
+    if result.relation_residuals:
+        print("\nKiểm tra từng bộ ba kỳ dị:")
+        for i, (left, right) in enumerate(result.relation_residuals, start=1):
+            ui, vi, sigma_name = indexed("u", i), indexed("v", i), indexed("σ", i)
+            print(
+                f"  i = {i}: ‖A{vi} − {sigma_name}{ui}‖₂ ≈ {scientific(left)}, "
+                f"‖Aᵀ{ui} − {sigma_name}{vi}‖₂ ≈ {scientific(right)}"
+            )
+
+    print("\nKẾT LUẬN ĐỂ CHÉP VÀO BÀI:")
+    if result.converged:
+        print("  SVD đạt đồng thời các kiểm tra tái tạo, trực giao và bộ ba kỳ dị.")
+        print(
+            "  Các sai số kiểm tra đều rất nhỏ, do đó ta nhận được phân tích SVD "
+            f"{label}: {formula}."
+        )
+    else:
+        print(
+            "  Sai số kiểm tra còn lớn, vì vậy kết quả SVD này chưa nên dùng để chép bài."
+        )
+    if result.warnings:
+        print("\nGhi chú:")
+        for warning in result.warnings:
+            # Ở bản chép thi chỉ giữ các cảnh báo có ý nghĩa toán học, bỏ chi tiết kỹ thuật.
+            if any(keyword in warning for keyword in ("rank_tol", "tolerance", "vòng lặp nội bộ")):
+                continue
+            print(f"  • {warning}")
+
+
+def _print_svd_full(
+    A: np.ndarray,
+    result: SVDResult,
+    decimals: int,
+    count: int | None,
+    form: str | None,
+) -> None:
+    """Bản đầy đủ: vẫn dễ đọc như bài giải, chỉ thêm ngưỡng kiểm tra ngắn gọn."""
+    section("D. KẾT QUẢ SVD VÀ KIỂM TRA")
+    U_view, Sigma, Vt_view, label, formula = _svd_display_parts(A, result, form)
+    shown = len(result.singular_values) if count is None else min(count, len(result.singular_values))
+
+    print("Các trị kỳ dị tìm được:")
+    for i, sigma in enumerate(result.singular_values[:shown], start=1):
+        print(f"  {indexed('σ', i)} = {sigma:.12e}")
+    print(f"Hạng số dùng trong phân tích: r = {result.rank}.")
+    print("Ngưỡng kiểm tra được chương trình chọn tự động theo kích thước và độ lớn của A.")
+    print(f"  Ngưỡng kiểm tra tuyệt đối: εₖₜ ≈ {result.final_absolute_tolerance:.7e}")
+    print(f"  Ngưỡng kiểm tra tương đối: εₖₜ,rel ≈ {result.final_relative_tolerance:.7e}")
+
+    print(f"\nDạng SVD: {label}.")
+    print(f"{formula}")
+    print(f"Kích thước: U={U_view.shape}, Σ={Sigma.shape}, Vᵀ={Vt_view.shape}.")
+    print_matrix("Uᵣ" if form != "full" else "U", U_view, decimals)
+    print_matrix("Σᵣ" if form != "full" else "Σ", Sigma, decimals)
+    print_matrix("Vᵣᵀ" if form != "full" else "Vᵀ", Vt_view, decimals)
+
+    reconstruction = U_view @ Sigma @ Vt_view
+    print_matrix("UᵣΣᵣVᵣᵀ" if form != "full" else "UΣVᵀ", reconstruction, decimals)
+
+    print("\nKiểm tra tái tạo và trực giao:")
+    print(f"  ‖A − UᵣΣᵣVᵣᵀ‖ꜰ ≈ {result.reconstruction_error:.7e}")
+    print(f"  Sai số tái tạo tương đối ≈ {result.relative_reconstruction_error:.7e}")
+    print(f"  ‖UᵣᵀUᵣ − I‖ꜰ ≈ {result.left_orthogonality_error:.7e}")
+    print(f"  ‖VᵣᵀVᵣ − I‖ꜰ ≈ {result.right_orthogonality_error:.7e}")
+
+    print("\nKiểm tra từng bộ ba kỳ dị:")
+    for i, (left, right) in enumerate(result.relation_residuals, start=1):
+        print(f"  i={i}: phần dư trái ≈ {left:.7e}; phần dư phải ≈ {right:.7e}.")
+
+    if result.warnings:
+        print("\nGhi chú:")
+        for warning in result.warnings:
+            print("  •", warning)
+    if result.converged:
+        print("\nKẾT LUẬN: Các kiểm tra cuối đều đạt, kết quả SVD được dùng để chép bài.")
+    else:
+        print("\nKẾT LUẬN: Sai số kiểm tra còn lớn, kết quả SVD chưa được chứng nhận.")
+
+
+def _print_svd_debug(
+    A: np.ndarray,
+    result: SVDResult,
+    decimals: int,
+    count: int | None,
+    form: str | None,
+) -> None:
+    """Bản kỹ thuật: giữ toàn bộ biến kiểm tra để debug code."""
+    section("D. KẾT QUẢ SVD VÀ KIỂM TRA KỸ THUẬT")
+    U_view, Sigma, Vt_view, label, _formula = _svd_display_parts(A, result, form)
+    shown = len(result.singular_values) if count is None else min(count, len(result.singular_values))
+    print(f"Hệ số đổi thang α = max|aᵢⱼ| = {result.scale_factor:.7e}.")
     print("Các trị kỳ dị có thể phân giải được (đã khôi phục về thang ban đầu):")
     for i, sigma in enumerate(result.singular_values[:shown], start=1):
-        print(f"  sigma_{i} = {sigma:.12e}")
-    print(
-        f"Hạng số theo tolerance: {result.rank}; "
-        f"rank_tol={result.rank_tolerance:.7e}."
-    )
+        print(f"  {indexed('σ', i)} = {sigma:.12e}")
+    print(f"Hạng số theo tolerance: {result.rank}; rank_tol={result.rank_tolerance:.7e}.")
     print("Không đồng nhất 'hạng số theo tolerance' với hạng toán học nếu dữ liệu kém điều kiện.")
 
-    print_matrix("U", result.U, decimals)
-    Sigma = np.zeros(A.shape)
-    for i, sigma in enumerate(result.singular_values[: min(A.shape)]):
-        Sigma[i, i] = sigma
-    print_matrix("Sigma", Sigma, decimals)
-    print_matrix("V^T", result.Vt, decimals)
-    reconstruction = result.U @ Sigma @ result.Vt
+    print(f"\nDạng SVD: {label}.")
+    print(f"Kích thước: U={U_view.shape}, Σ={Sigma.shape}, V^T={Vt_view.shape}.")
+    print_matrix("Uᵣ" if form != "full" else "U", U_view, decimals)
+    print_matrix("Σᵣ" if form != "full" else "Σ", Sigma, decimals)
+    print_matrix("Vᵣᵀ" if form != "full" else "Vᵀ", Vt_view, decimals)
+    reconstruction = U_view @ Sigma @ Vt_view
     print_matrix("U Sigma V^T", reconstruction, decimals)
 
     print("\nKiểm tra từng bộ ba kỳ dị (phần dư tương đối):")
@@ -780,9 +1132,17 @@ def print_svd_result(A: np.ndarray, result: SVDResult, decimals: int, count: int
             f"  i={i}: rel(Av-sigma*u)={left:.7e}; "
             f"rel(A^T u-sigma*v)={right:.7e}."
         )
+    print(f"Tolerance residual bo ba ky di = {result.singular_triplet_tolerance:.7e}.")
+    print(f"Tolerance kiem tra cuoi tuyet doi = {result.final_absolute_tolerance:.7e}.")
+    print(f"Tolerance kiem tra cuoi tuong doi = {result.final_relative_tolerance:.7e}.")
+    print(f"internal_power_converged={result.internal_power_converged}")
+    print(f"singular_triplet_residual_ok={result.singular_triplet_residual_ok}")
+    print(f"orthogonality_ok={result.orthogonality_ok}")
+    print(f"reconstruction_ok={result.reconstruction_ok}")
+    print(f"final_accepted={result.final_accepted}")
     print(f"||U^T U-I||_F={result.left_orthogonality_error:.7e} (tol={result.orthogonality_tolerance:.7e})")
     print(f"||V^T V-I||_F={result.right_orthogonality_error:.7e} (tol={result.orthogonality_tolerance:.7e})")
-    print(f"||A-U Sigma V^T||_F={result.reconstruction_error:.7e}")
+    print(f"||A-U Sigma V^T||_F={result.reconstruction_error:.7e} (tol={result.final_absolute_tolerance:.7e})")
     print(
         "Sai số tái tạo tương đối="
         f"{result.relative_reconstruction_error:.7e} "
@@ -795,6 +1155,26 @@ def print_svd_result(A: np.ndarray, result: SVDResult, decimals: int, count: int
     else:
         print("KẾT LUẬN: SVD CHƯA HỘI TỤ; không chứng nhận kết quả cuối.")
 
+
+def print_svd_result(
+    A: np.ndarray,
+    result: SVDResult,
+    decimals: int,
+    count: int | None = None,
+    form: str | None = None,
+    presentation_mode: str = "exam",
+) -> None:
+    """In kết quả SVD theo đúng chế độ trình bày đã chọn."""
+    presentation_mode = (presentation_mode or "exam").strip().lower()
+    if presentation_mode in {"exam", "chep_thi", "bai_thi", "1"}:
+        _print_svd_exam(A, result, decimals, count, form)
+    elif presentation_mode in {"full", "day_du", "2"}:
+        _print_svd_full(A, result, decimals, count, form)
+    elif presentation_mode in {"debug", "ky_thuat", "technical", "3"}:
+        _print_svd_debug(A, result, decimals, count, form)
+    else:
+        raise ValueError("presentation_mode phải là exam, full hoặc debug.")
+
 def main() -> None:
     print(LINE)
     print("TÌM GIÁ TRỊ KỲ DỊ BẰNG PHƯƠNG PHÁP LŨY THỪA VÀ XUỐNG THANG")
@@ -805,6 +1185,18 @@ def main() -> None:
     n = input_integer("Nhập số cột n của A: ", 1)
     A = input_matrix(m, n)
     initial = input_start_vector(n)
+
+    print("\nDạng phân tích cần in:")
+    print("  1. SVD rút gọn theo hạng r (mặc định trong bài thi)")
+    print("  2. SVD đầy đủ")
+    print("  3. SVD mỏng gồm min(m,n) bộ ba, kể cả σ gần 0")
+    while True:
+        form_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        if form_choice in {"1", "2", "3"}:
+            break
+        print("  Lỗi: chỉ chọn 1, 2 hoặc 3.")
+    form = {"1": "reduced", "2": "full", "3": "economy"}[form_choice]
+
 
     print("\nChế độ dừng phương pháp lũy thừa:")
     print("  1. Lặp đến khi đạt sai số ε")
@@ -822,16 +1214,23 @@ def main() -> None:
     else:
         fixed_steps = input_integer("Nhập số vòng lặp k: ", 1)
 
-    count_max = min(m, n)
-    count = input_integer(
-        f"Số giá trị kỳ dị cần tìm, từ 1 đến {count_max} [Enter = {count_max}]: ",
-        1,
-        count_max,
-    )
-    while count > count_max:
-        print(f"  Lỗi: chỉ có tối đa {count_max} giá trị kỳ dị.")
-        count = input_integer(f"Nhập lại (1..{count_max}): ", 1)
     decimals = input_integer("Số chữ số sau dấu phẩy [Enter = 7]: ", 0, 7)
+
+    print("\nChọn kiểu trình bày:")
+    print("  1. Bản chép thi (gọn, không in thông số kỹ thuật)")
+    print("  2. Bản đầy đủ (có thêm ngưỡng kiểm tra, vẫn dễ chép)")
+    print("  3. Bản kỹ thuật/debug")
+    try:
+        presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+    except (EOFError, StopIteration):
+        presentation_choice = "1"
+    while presentation_choice not in {"1", "2", "3"}:
+        print("  Lỗi: chỉ chọn 1, 2 hoặc 3.")
+        try:
+            presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        except (EOFError, StopIteration):
+            presentation_choice = "1"
+    presentation_mode = {"1": "exam", "2": "full", "3": "debug"}[presentation_choice]
 
     print_theory(m, n)
     section("C. ÁP DỤNG CHO MA TRẬN ĐÃ NHẬP")
@@ -843,9 +1242,10 @@ def main() -> None:
         epsilon=epsilon,
         max_iter=maximum_iterations,
         fixed_steps=fixed_steps,
-        full_matrices=True,
+        full_matrices=form in {"full", "economy"},
     )
-    print_svd_result(A, result, decimals, count=count)
+    print_deflation_history(A, result, decimals)
+    print_svd_result(A, result, decimals, form=form, presentation_mode=presentation_mode)
 
 
 if __name__ == "__main__":

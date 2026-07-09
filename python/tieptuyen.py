@@ -2,9 +2,11 @@ import sympy as sp
 import numpy as np
 import math
 import sys
+from exam_format import exam_print as print
 from truyen_sai_so import propagate_bound, symbolic_derivative_bound
 from dataclasses import dataclass
 from typing import Callable
+from input_utils import parse_math_expression, parse_real
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -35,6 +37,7 @@ def safeguarded_newton(
     derivative_tolerance: float = 1e-14,
     assumptions_verified: bool = False,
     samples: int = 1001,
+    fixed_iterations: int | None = None,
 ) -> NewtonResult:
     """Newton bảo vệ bởi khoảng đổi dấu và bước chia đôi."""
     if not all(math.isfinite(v) for v in (a, b, epsilon, derivative_tolerance)):
@@ -42,17 +45,23 @@ def safeguarded_newton(
     if not a < b or epsilon <= 0 or derivative_tolerance <= 0 or max_iter <= 0:
         raise ValueError("Cần a < b; epsilon, tolerance và max_iter dương.")
 
+    if fixed_iterations is not None and fixed_iterations < 0:
+        raise ValueError("fixed_iterations phai khong am.")
+
     def value(fun: Callable[[float], float], point: float, name: str) -> float:
         result = float(fun(point))
         if not math.isfinite(result):
             raise ArithmeticError(f"{name}({point}) không hữu hạn.")
         return result
 
+    fixed_mode = fixed_iterations is not None
     fa, fb = value(f, a, "f"), value(f, b, "f")
-    if abs(fa) <= derivative_tolerance:
-        return NewtonResult(a, True, assumptions_verified, "Nghiệm ở đầu mút a.", [], abs(fa), 0.0, (a, a))
-    if abs(fb) <= derivative_tolerance:
-        return NewtonResult(b, True, assumptions_verified, "Nghiệm ở đầu mút b.", [], abs(fb), 0.0, (b, b))
+    if (fa == 0.0 if fixed_mode else abs(fa) <= derivative_tolerance):
+        exact = fa == 0.0
+        return NewtonResult(a, True, exact, "Đầu mút a là nghiệm chính xác." if exact else "Đầu mút a chỉ đạt ngưỡng phần dư.", [], abs(fa), 0.0 if exact else None, (a, a) if exact else (a, b))
+    if (fb == 0.0 if fixed_mode else abs(fb) <= derivative_tolerance):
+        exact = fb == 0.0
+        return NewtonResult(b, True, exact, "Đầu mút b là nghiệm chính xác." if exact else "Đầu mút b chỉ đạt ngưỡng phần dư.", [], abs(fb), 0.0 if exact else None, (b, b) if exact else (a, b))
     if fa * fb > 0:
         raise ValueError("[a,b] không đổi dấu.")
 
@@ -79,33 +88,42 @@ def safeguarded_newton(
 
     rows: list[tuple[int, float, float, float, str, float | None]] = []
     last_bound = None
-    for k in range(max_iter + 1):
+    loop_limit = fixed_iterations if fixed_iterations is not None else max_iter
+    for k in range(loop_limit + 1):
         fx = value(f, x, "f")
         residual = abs(fx)
         last_bound = residual / m1 if derivative_nonzero_sampled else None
         rows.append((k, x, fx, 0.0 if k == 0 else rows[-1][3], "khởi tạo" if k == 0 else rows[-1][4], last_bound))
-        if residual <= derivative_tolerance:
+        if residual <= derivative_tolerance and (fixed_iterations is None or fx == 0.0):
+            exact = fx == 0.0
             return NewtonResult(
                 x,
                 True,
-                assumptions_verified,
-                "Phần dư đạt tolerance.",
+                exact or assumptions_verified,
+                "Tìm được nghiệm chính xác." if exact else "Phần dư đạt tolerance; chứng nhận phụ thuộc các giả thiết đã xác minh.",
                 rows,
                 residual,
                 0.0 if residual == 0.0 else last_bound,
                 (x, x) if residual == 0.0 else (a, b),
             )
-        if last_bound is not None and last_bound <= epsilon:
+        if fixed_iterations is None and last_bound is not None and last_bound <= epsilon:
             certified = assumptions_verified and derivative_nonzero_sampled
             reason = "Đạt chặn hậu nghiệm |f(x_k)|/m1."
             if not certified:
                 reason += " Các giả thiết mới được khảo sát số, chưa phải chứng minh tuyệt đối."
             return NewtonResult(x, True, certified, reason, rows, residual, last_bound, (a, b))
-        if (b - a) / 2.0 <= epsilon:
+        if fixed_iterations is None and (b - a) / 2.0 <= epsilon:
             midpoint = (a + b) / 2.0
             fm = abs(value(f, midpoint, "f"))
             certified = assumptions_verified
             return NewtonResult(midpoint, True, certified, "Đạt chặn sai số từ khoảng đổi dấu.", rows, fm, (b - a) / 2.0, (a, b))
+
+        if fixed_iterations is not None and k >= fixed_iterations:
+            reason = (
+                f"Da thuc hien dung k={fixed_iterations} buoc Newton; "
+                "chua dung tieu chuan epsilon de chung nhan."
+            )
+            return NewtonResult(x, True, assumptions_verified and last_bound is not None and last_bound <= epsilon, reason, rows, residual, last_bound, (a, b))
 
         dfx = value(derivative, x, "f'")
         method = "Newton"
@@ -212,7 +230,7 @@ def newton_method(max_iter=1000):
     if use_G == "y":
         G_name = input("Nhập ký hiệu của hàm đó (vd: V, S, F...): ").strip() or "G"
         g_input = input(f"Nhập biểu thức {G_name}(x) (vd: 1/6 * pi * x**3): ")
-        G_expr_raw = sp.sympify(g_input, locals={"pi": pi_sym, "e": e_sym})
+        G_expr_raw = parse_math_expression(g_input, {"x": x, "pi": pi_sym, "e": e_sym})
 
     # 3. Xử lý hằng số Pi, E
     combined_input = f_input + " " + g_input
@@ -235,7 +253,7 @@ def newton_method(max_iter=1000):
 
     # 4. Thay số và thiết lập hàm f(x), f'(x), f''(x)
     try:
-        f_expr = sp.sympify(f_input, locals={"pi": pi_val, "e": e_val})
+        f_expr = parse_math_expression(f_input, {"x": x, "pi": sp.Float(pi_val), "e": sp.Float(e_val)})
         f_prime = sp.diff(f_expr, x)
         f_double_prime = sp.diff(f_prime, x)
 
@@ -305,8 +323,8 @@ def newton_method(max_iter=1000):
 
     # --- BƯỚC 1: KHOẢNG CÁCH LY VÀ XÉT DẤU ---
     print("\n--- BƯỚC 1: KHOẢNG CÁCH LY VÀ XÉT DẤU ---")
-    a = float(input("Nhập cận dưới a = "))
-    b = float(input("Nhập cận trên b = "))
+    a = parse_real(input("Nhập cận dưới a = "))
+    b = parse_real(input("Nhập cận trên b = "))
 
     print(f"\nf'(x) = {f_prime}")
     print(f"f''(x) = {f_double_prime}")
@@ -381,10 +399,10 @@ def newton_method(max_iter=1000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_abs"
         elif choice == "2":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -397,10 +415,10 @@ def newton_method(max_iter=1000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập sai số tuyệt đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
         elif choice == "2":
-            target_val = float(input("Nhập sai số tương đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
             cond_type = "x_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -553,4 +571,9 @@ def newton_method(max_iter=1000):
 
 
 if __name__ == "__main__":
-    newton_method()
+    try:
+        newton_method()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

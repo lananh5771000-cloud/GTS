@@ -1,6 +1,10 @@
 import sys
+from exam_format import exam_print as print
 import math
 from fractions import Fraction
+from numbers import Integral, Real
+import sympy as sp
+from input_utils import MathInputError, parse_exact, parse_real, split_number_row
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -33,7 +37,7 @@ def input_positive_number(prompt, default=None):
             return default
         try:
             try:
-                value = float(Fraction(token))
+                value = parse_real(token)
             except ValueError:
                 value = float(token)
 
@@ -55,15 +59,10 @@ def input_coefficients(degree):
     print("Có thể nhập số nguyên, số thập phân hoặc phân số.")
 
     while True:
-        tokens = input("Các hệ số cách nhau bởi khoảng trắng: ").split()
-
-        if len(tokens) != expected:
-            print(f"Lỗi: Cần nhập đúng {expected} hệ số.")
-            continue
-
         try:
-            return [Fraction(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+            tokens = split_number_row(input("Các hệ số cách nhau bởi khoảng trắng: "), expected)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, ZeroDivisionError):
             print("Lỗi: Hệ số không hợp lệ. Ví dụ hợp lệ: 2, -3, 0.25, 1/3.")
 
 
@@ -93,10 +92,29 @@ def minimum_display_decimals(epsilon):
 
 
 def strip_leading_zeros(coefficients):
-    coefficients = list(coefficients)
+    coefficients = [normalize_coefficient(value) for value in coefficients]
     while len(coefficients) > 1 and coefficients[0] == 0:
         coefficients.pop(0)
     return coefficients
+
+
+def normalize_coefficient(value):
+    """Chuẩn hóa mọi kiểu hệ số ngay tại biên của các hàm lõi."""
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, Integral):
+        return Fraction(int(value))
+    if isinstance(value, Real):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("Hệ số không được là NaN hoặc vô cùng.")
+        return Fraction(str(number))
+    expression = sp.sympify(value)
+    if expression.is_real is not True or expression.has(sp.nan, sp.zoo, sp.oo, -sp.oo):
+        raise ValueError("Hệ số phải là số thực hữu hạn.")
+    if expression.is_Rational:
+        return Fraction(int(expression.p), int(expression.q))
+    return sp.simplify(expression)
 
 
 def is_zero_polynomial(coefficients):
@@ -256,8 +274,8 @@ def horner_value(coefficients, x):
 
 def horner_value_exact(coefficients, x):
     """Tính P(x) chính xác khi x và hệ số là Fraction."""
-    x = Fraction(x)
-    result = Fraction(0)
+    x = sp.sympify(x)
+    result = sp.S.Zero
 
     for coefficient in coefficients:
         result = result * x + coefficient
@@ -270,10 +288,10 @@ def cauchy_radius_exact(coefficients):
     coefficients = strip_leading_zeros(coefficients)
 
     if polynomial_degree(coefficients) <= 0:
-        return Fraction(0)
+        return sp.S.Zero
 
     leading = abs(coefficients[0])
-    return Fraction(1) + max(abs(value) / leading for value in coefficients[1:])
+    return sp.S.One + max(abs(value) / leading for value in coefficients[1:])
 
 
 def sturm_sequence(coefficients):
@@ -382,9 +400,11 @@ def lagrange_positive_upper_bound(coefficients):
 
 
 def fraction_text(value):
-    if value.denominator == 1:
-        return str(value.numerator)
-    return f"{value.numerator}/{value.denominator}"
+    if isinstance(value, Fraction):
+        if value.denominator == 1:
+            return str(value.numerator)
+        return f"{value.numerator}/{value.denominator}"
+    return sp.sstr(sp.simplify(value))
 
 
 def polynomial_text(coefficients, variable="x"):
@@ -788,16 +808,16 @@ def print_theory():
     print("\nInput: hệ số của P(x), sai số eps.")
     print("Output: toàn bộ nghiệm thực, bội của nghiệm và khoảng sai số chứng nhận.")
     print("\nCho:")
-    print("P(x) = a_0*x^n + a_1*x^(n-1) + ... + a_n, a_0 != 0.")
+    print("P(x) = a₀xⁿ + a₁xⁿ⁻¹ + … + aₙ, a₀ ≠ 0.")
 
     print("\n1. Sơ đồ Hoocne")
-    print("  b_0 = a_0")
-    print("  b_i = b_(i-1)*x + a_i, i = 1,...,n")
-    print("  P(x) = b_n")
+    print("  b₀ = a₀")
+    print("  bᵢ = bᵢ₋₁x + aᵢ, i = 1,…,n")
+    print("  P(x) = bₙ")
     print("Sơ đồ này được dùng để tính nhanh P(x) trong khảo sát và chia đôi.")
 
     print("\n2. Miền chứa nghiệm")
-    print("  R = 1 + max{|a_i/a_0|, i=1,...,n}")
+    print("  R = 1 + max{|aᵢ/a₀|, i = 1,…,n}")
     print(
         "Mọi nghiệm phức z của P đều thỏa |z| < R; "
         "do đó mọi nghiệm thực nằm trong (-R,R)."
@@ -812,13 +832,13 @@ def print_theory():
 
     print("\n4. Nghiệm bội")
     print("Để không bỏ sót nghiệm bội chẵn, chương trình phân tích:")
-    print("  P(x)/a_0 = Q_1(x)^1 * Q_2(x)^2 * ...")
+    print("  P(x)/a₀ = Q₁(x)Q₂(x)²…")
     print("Mọi nghiệm của Q_j có bội đúng bằng j trong P.")
 
     print("\n5. Phương pháp chia đôi")
-    print("  x_k = (a_k + b_k)/2")
+    print("  xₖ = (aₖ + bₖ)/2")
     print("  Giữ lại nửa khoảng có đổi dấu.")
-    print("  Dừng khi (b_k-a_k)/2 <= eps.")
+    print("  Dừng khi (bₖ − aₖ)/2 ≤ ε.")
     print(
         "  Nghiệm in ra phải nằm trong khoảng cuối và có chặn "
         "|x-x*| <= eps; hiệu chỉnh Newton chỉ được nhận nếu không làm mất chặn này."
@@ -916,8 +936,8 @@ def solve_polynomial(original_coefficients, epsilon, decimals, print_full_table)
         )
 
     print("\nBán kính nghiệm Cauchy:")
-    print("R = 1 + max|a_i/a_0|")
-    print(f"max|a_i/a_0| = {radius - 1.0:.{decimals}f}")
+    print("R = 1 + max|aᵢ/a₀|")
+    print(f"max|aᵢ/a₀| = {radius - 1.0:.{decimals}f}")
     print(f"R = {radius:.{decimals}f}")
     print(
         f"Mọi nghiệm thực của P nằm trong "
@@ -934,7 +954,7 @@ def solve_polynomial(original_coefficients, epsilon, decimals, print_full_table)
     print("\nCận Lagrange theo dấu hệ số:")
 
     if positive_bound is None:
-        print("Sau khi chuẩn hóa a_0 > 0 không có hệ số âm; không có nghiệm dương.")
+        print("Sau khi chuẩn hóa a₀ > 0 không có hệ số âm; không có nghiệm dương.")
     else:
         print(f"Mọi nghiệm dương thỏa 0 < x < {positive_bound:.{decimals}f}.")
 

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from exam_format import exam_print as print
 import sys
 from dataclasses import dataclass
-from fractions import Fraction
+from input_utils import MathInputError, parse_real, split_number_row
 
 import numpy as np
 
@@ -23,7 +24,7 @@ def parse_number(text: str) -> float:
     text = text.strip().replace("−", "-")
     if "," in text and "." not in text:
         text = text.replace(",", ".")
-    value = float(Fraction(text))
+    value = parse_real(text)
     if not math.isfinite(value):
         raise ValueError
     return value
@@ -59,16 +60,10 @@ def read_positive(prompt: str, default: float | None = None) -> float:
 
 def read_row(prompt: str, size: int) -> np.ndarray:
     while True:
-        raw = input(prompt)
-        for symbol in "[](){};":
-            raw = raw.replace(symbol, " ")
-        parts = raw.split()
-        if len(parts) != size:
-            print(f"  Lỗi: cần đúng {size} số.")
-            continue
         try:
+            parts = split_number_row(input(prompt), size)
             return np.array([parse_number(part) for part in parts], dtype=float)
-        except (ValueError, ZeroDivisionError):
+        except (MathInputError, ValueError, ZeroDivisionError):
             print("  Lỗi: dữ liệu không hợp lệ.")
 
 
@@ -130,6 +125,53 @@ def relative_residual(A: np.ndarray, x: np.ndarray, b: np.ndarray) -> float:
     return numerator / denominator if denominator else numerator
 
 
+def symmetric_jacobi_eigenvalues(
+    matrix: np.ndarray,
+    *,
+    tolerance: float | None = None,
+    maximum_rotations: int | None = None,
+) -> np.ndarray:
+    """Tính trị riêng ma trận đối xứng bằng phép quay Jacobi tự cài đặt."""
+
+    A = np.asarray(matrix, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1] or A.shape[0] == 0:
+        raise ValueError("Ma trận phải vuông và khác rỗng.")
+    if not np.all(np.isfinite(A)):
+        raise ValueError("Ma trận chứa NaN hoặc vô cực.")
+    scale = max(1.0, float(np.linalg.norm(A, np.inf)))
+    symmetry_tolerance = 100.0 * np.finfo(float).eps * scale
+    if not np.allclose(A, A.T, rtol=0.0, atol=symmetry_tolerance):
+        raise ValueError("Phép quay Jacobi yêu cầu ma trận đối xứng.")
+    work = 0.5 * (A + A.T)
+    n = A.shape[0]
+    threshold = tolerance if tolerance is not None else symmetry_tolerance
+    limit = maximum_rotations if maximum_rotations is not None else max(1, 50 * n * n)
+    for _ in range(limit):
+        upper = np.triu(np.abs(work), 1)
+        p, q = np.unravel_index(int(np.argmax(upper)), upper.shape)
+        if upper[p, q] <= threshold:
+            return np.sort(np.diag(work).copy())
+        app, aqq, apq = work[p, p], work[q, q], work[p, q]
+        tau = (aqq - app) / (2.0 * apq)
+        t = (
+            math.copysign(1.0, tau) / (abs(tau) + math.sqrt(1.0 + tau * tau))
+            if tau != 0.0
+            else 1.0
+        )
+        cosine = 1.0 / math.sqrt(1.0 + t * t)
+        sine = t * cosine
+        for k in range(n):
+            if k in (p, q):
+                continue
+            akp, akq = work[k, p], work[k, q]
+            work[k, p] = work[p, k] = cosine * akp - sine * akq
+            work[k, q] = work[q, k] = sine * akp + cosine * akq
+        work[p, p] = app - t * apq
+        work[q, q] = aqq + t * apq
+        work[p, q] = work[q, p] = 0.0
+    raise ArithmeticError("Phép quay Jacobi chưa hội tụ trong giới hạn số vòng quay.")
+
+
 @dataclass
 class Record:
     k: int
@@ -187,7 +229,7 @@ def simple_iteration(
     reason = f"đã thực hiện đúng k={fixed_iterations} bước"
 
     initial_residual = float(np.linalg.norm(A @ x - b, np.inf))
-    if initial_residual <= epsilon:
+    if initial_residual <= epsilon and fixed_iterations == 0:
         return Result(x, records, q, True, "Nghiệm ban đầu đã thỏa phần dư.")
 
     for k in range(1, limit + 1):
@@ -255,45 +297,54 @@ def print_table(records: list[Record], decimals: int) -> None:
 
 def main() -> None:
     print(LINE)
-    print("LẶP ĐƠN TUYẾN TÍNH – GIẢI HỆ Ax=b")
+    print("LẶP ĐƠN TUYẾN TÍNH – DẠNG x=Bx+d")
     print(LINE)
     print("Nhập 0 ở menu để thoát; có thể nhập phân số như 1/3.")
-    print("1. Tự động chọn tau cho A đối xứng xác định dương")
-    print("2. Tự nhập tau")
-    print("3. Tự nhập trực tiếp ma trận lặp B và vector d")
+    print("1. Nhập A,b rồi tự tạo dạng lặp x=Bx+d")
+    print("2. Nhập trực tiếp ma trận lặp B và vector d")
     print("0. Thoát")
-    choice = input("Chọn [Enter = 1]: ").strip() or "1"
-    if choice == "0":
+    source_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+    if source_choice == "0":
         return
-    if choice not in {"1", "2", "3"}:
+    if source_choice not in {"1", "2"}:
         print("Lựa chọn không hợp lệ.")
         return
 
     n = read_int("Cấp ma trận n: ", 1)
-    A = read_matrix("A", n, n)
-    b = read_row(f"Nhập vector b gồm {n} số: ", n)
-
     tau = None
-    if choice == "1":
+    eigenvalues = None
+    direct_mode = source_choice == "2"
+    if direct_mode:
+        print("\nChế độ nhập trực tiếp B,d. Không yêu cầu nhập A hoặc b.")
+        B = read_matrix("B", n, n)
+        d = read_row(f"Nhập vector d gồm {n} số: ", n)
+        A = np.eye(n) - B
+        b = d.copy()
+    else:
+        A = read_matrix("A", n, n)
+        b = read_row(f"Nhập vector b gồm {n} số: ", n)
+        print("\nCách tạo B,d từ A,b:")
+        print("1. Tự động chọn tau cho A đối xứng xác định dương")
+        print("2. Tự nhập tau")
+        tau_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        if tau_choice not in {"1", "2"}:
+            print("Lựa chọn không hợp lệ.")
+            return
+    if not direct_mode and tau_choice == "1":
         if not np.allclose(A, A.T, rtol=0.0, atol=1e-12 * max(1.0, np.linalg.norm(A, np.inf))):
             print("Kết luận: A không đối xứng, không áp dụng được lựa chọn tự động này.")
             return
-        eigenvalues = np.linalg.eigvalsh(A)
+        eigenvalues = symmetric_jacobi_eigenvalues(A)
         if eigenvalues[0] <= 0.0:
             print("Kết luận: A không xác định dương, không áp dụng được công thức tau tự động.")
             return
         tau = 2.0 / float(eigenvalues[0] + eigenvalues[-1])
         B = np.eye(n) - tau * A
         d = tau * b
-    elif choice == "2":
+    elif not direct_mode:
         tau = read_positive("Nhập tau > 0: ")
         B = np.eye(n) - tau * A
         d = tau * b
-        eigenvalues = None
-    else:
-        B = read_matrix("B", n, n)
-        d = read_row(f"Nhập vector d gồm {n} số: ", n)
-        eigenvalues = None
 
     print("\nChọn chuẩn dùng để chứng nhận co:")
     print("1. Chuẩn vô cùng (khuyên dùng)")
@@ -308,22 +359,27 @@ def main() -> None:
     )
 
     print("\nChế độ dừng:")
-    print("1. Theo chặn sai số hậu nghiệm")
-    print("2. Thực hiện đúng k bước")
+    print("1. Thực hiện đúng k bước")
+    print("2. Lặp đến sai số epsilon")
     stop_choice = input("Chọn [Enter = 1]: ").strip() or "1"
-    epsilon = read_positive("Sai số epsilon [Enter = 1e-7]: ", 1e-7)
     fixed_iterations = 0
     maximum_iterations = 10000
-    if stop_choice == "2":
+    if stop_choice == "1":
         fixed_iterations = read_int("Số bước k: ", 1)
+        epsilon = 1e-12
+        maximum_iterations = fixed_iterations
     else:
+        epsilon = read_positive("Sai số epsilon [Enter = 1e-7]: ", 1e-7)
         maximum_iterations = read_int("k_max [Enter = 10000]: ", 1, 10000)
     decimals = read_int("Số chữ số sau dấu phẩy [Enter = 7]: ", 0, 7)
 
     print_theory()
     section("B. DỮ KIỆN VÀ DẠNG LẶP")
-    print_matrix("A", A, decimals)
-    print_vector("b", b, decimals)
+    if direct_mode:
+        print("Dữ liệu nhập trực tiếp theo x^(k+1)=B x^(k)+d; không nhập A,b.")
+    else:
+        print_matrix("A", A, decimals)
+        print_vector("b", b, decimals)
     if tau is not None:
         if eigenvalues is not None:
             print("Các trị riêng của A dùng để chọn tau:")
@@ -350,8 +406,12 @@ def main() -> None:
     print(f"Dừng vì {result.reason}.")
     print_vector(f"x^({len(result.records)})", result.x, decimals)
     residual = A @ result.x - b
-    print_vector("A x-b", residual, decimals)
-    print(f"||Ax-b||_∞={np.linalg.norm(residual, np.inf):.7e}")
+    if direct_mode:
+        print_vector("x-Bx-d", residual, decimals)
+        print(f"||x-Bx-d||_∞={np.linalg.norm(residual, np.inf):.7e}")
+    else:
+        print_vector("A x-b", residual, decimals)
+        print(f"||Ax-b||_∞={np.linalg.norm(residual, np.inf):.7e}")
     if result.records and math.isfinite(result.records[-1].error_bound):
         print(f"Chặn sai số hậu nghiệm E_k={result.records[-1].error_bound:.7e}.")
     if result.converged:

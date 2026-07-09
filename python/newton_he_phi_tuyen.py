@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+from exam_format import exam_print as print
 import sys
 from dataclasses import dataclass
-from fractions import Fraction
+from input_utils import MathInputError, parse_math_expression, parse_real, split_number_row
 
 import numpy as np
 import sympy as sp
@@ -37,7 +38,7 @@ def parse_number(text: str) -> float:
     text = text.strip().replace("−", "-")
     if "," in text and "." not in text:
         text = text.replace(",", ".")
-    value = float(Fraction(text))
+    value = parse_real(text)
     if not math.isfinite(value):
         raise ValueError
     return value
@@ -73,13 +74,10 @@ def read_positive(prompt: str, default: float | None = None) -> float:
 
 def read_vector(prompt: str, size: int) -> np.ndarray:
     while True:
-        parts = input(prompt).replace("[", " ").replace("]", " ").split()
-        if len(parts) != size:
-            print(f"  Lỗi: cần đúng {size} số.")
-            continue
         try:
+            parts = split_number_row(input(prompt), size)
             return np.array([parse_number(part) for part in parts], dtype=float)
-        except (ValueError, ZeroDivisionError):
+        except (MathInputError, ValueError, ZeroDivisionError):
             print("  Lỗi: vector chứa dữ liệu không hợp lệ.")
 
 
@@ -254,7 +252,7 @@ def newton_system(
         except ArithmeticError as error:
             return Result(x, records, False, str(error), "numerical_failure", math.inf)
         residual_old = float(np.linalg.norm(F_old, np.inf))
-        if residual_old <= epsilon:
+        if residual_old <= epsilon and fixed_iterations == 0:
             reason = (
                 "Nghiệm ban đầu đã thỏa hệ."
                 if k == 0
@@ -290,7 +288,7 @@ def newton_system(
         residual_norm = float(np.linalg.norm(F_new, np.inf))
         records.append(Record(k, x.copy(), F_old, J_old, delta, x_new.copy(), step_norm, residual_norm))
         x = x_new
-        if residual_norm <= epsilon:
+        if residual_norm <= epsilon and fixed_iterations == 0:
             converged = True
             status = "converged"
             reason = f"||F(x)||_∞ <= epsilon={epsilon:.3e}"
@@ -298,7 +296,12 @@ def newton_system(
 
     if fixed_iterations > 0:
         converged = bool(records and records[-1].residual_norm <= epsilon)
-        status = "converged" if converged else "fixed_steps"
+        status = "fixed_steps"
+        reason = (
+            f"đã thực hiện đúng k={fixed_iterations} bước; residual cuối đạt epsilon"
+            if converged
+            else f"đã thực hiện đúng k={fixed_iterations} bước; residual cuối chưa đạt epsilon"
+        )
     elif not converged:
         status = "max_iter_reached"
         reason = f"đạt k_max={maximum_iterations} nhưng chưa thỏa điều kiện dừng"
@@ -376,15 +379,13 @@ def main() -> None:
             break
         print("  Lỗi: tên biến phải hợp lệ, khác nhau và đủ số lượng.")
     variables = list(sp.symbols(" ".join(names), seq=True))
-    local_dict = {**SAFE_FUNCTIONS, **dict(zip(names, variables))}
-
     expressions: list[sp.Expr] = []
     print("\nNhập vế trái f_i(x)=0:")
     for i in range(n):
         while True:
             text = input(f"  f_{i + 1} = ").strip().replace("^", "**")
             try:
-                expression = sp.sympify(text, locals=local_dict)
+                expression = parse_math_expression(text, dict(zip(names, variables)))
                 if expression.free_symbols - set(variables):
                     raise ValueError("có biến chưa khai báo")
                 expressions.append(expression)

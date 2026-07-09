@@ -1,6 +1,9 @@
 import math
+from exam_format import exam_print as print
 import sys
 from fractions import Fraction
+import sympy as sp
+from input_utils import MathInputError, parse_exact, split_number_row
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -44,17 +47,10 @@ def input_matrix_row(prompt, expected_count):
     2, -3, 0.25, 1/3, -5/7.
     """
     while True:
-        tokens = input(prompt).split()
-
-        if len(tokens) != expected_count:
-            print(
-                f"Lỗi: Dòng phải có đúng {expected_count} phần tử. Vui lòng nhập lại."
-            )
-            continue
-
         try:
-            return [Fraction(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+            tokens = split_number_row(input(prompt), expected_count)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, ZeroDivisionError):
             print(
                 "Lỗi: Chỉ nhập số nguyên, số thập phân hoặc phân số hợp lệ "
                 "(ví dụ 2, -3, 0.25, 1/3)."
@@ -71,9 +67,11 @@ def input_matrix(name, rows, columns):
 
 def exact_number(value):
     """Hiển thị số chính xác dưới dạng số nguyên hoặc phân số."""
-    if value.denominator == 1:
-        return str(value.numerator)
-    return f"{value.numerator}/{value.denominator}"
+    if isinstance(value, Fraction):
+        if value.denominator == 1:
+            return str(value.numerator)
+        return f"{value.numerator}/{value.denominator}"
+    return sp.sstr(sp.simplify(value))
 
 
 def decimal_number(value, decimals):
@@ -792,3 +790,5 @@ if __name__ == "__main__":
         main()
     except (EOFError, KeyboardInterrupt):
         print("\nĐã kết thúc chương trình.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

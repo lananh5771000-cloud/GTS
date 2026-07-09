@@ -1,6 +1,8 @@
 import sys
+from exam_format import exam_print as print
 
 import sympy as sp
+from input_utils import MathInputError, parse_exact, split_number_row
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -34,13 +36,10 @@ def input_nonnegative_integer(prompt, default=None):
 
 def input_matrix_row(prompt, size):
     while True:
-        tokens = input(prompt).split()
-        if len(tokens) != size:
-            print(f"Lỗi: Hàng phải có đúng {size} phần tử.")
-            continue
         try:
-            return [sp.Rational(token) for token in tokens]
-        except (ValueError, TypeError, ZeroDivisionError):
+            tokens = split_number_row(input(prompt), size)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, TypeError, ZeroDivisionError):
             print("Lỗi: Hãy nhập số nguyên, số thập phân hoặc phân số (ví dụ: 2, 0.25, 1/3).")
 
 
@@ -226,3 +225,5 @@ if __name__ == "__main__":
         main()
     except (EOFError, KeyboardInterrupt):
         print("\nĐã kết thúc chương trình.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

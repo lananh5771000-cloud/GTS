@@ -7,6 +7,7 @@ SymPy chi duoc dung de bien doi dai so; khong dung Newton/nsolve/Seidel.
 from __future__ import annotations
 
 import itertools
+from exam_format import exam_print as print
 import math
 import sys
 import time
@@ -16,6 +17,7 @@ from typing import Sequence
 
 import mpmath as mp
 import sympy as sp
+from input_utils import MathInputError, parse_math_expression, parse_real
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -64,8 +66,8 @@ def parse_expression(text: str, symbols: Sequence[sp.Symbol]) -> sp.Expr:
     local = dict(ALLOWED_FUNCTIONS)
     local.update({str(x): x for x in symbols})
     try:
-        expr = sp.sympify(text, locals=local, evaluate=True)
-    except (sp.SympifyError, SyntaxError, TypeError, ValueError) as exc:
+        expr = parse_math_expression(text, {str(x): x for x in symbols})
+    except (MathInputError, sp.SympifyError, SyntaxError, TypeError, ValueError) as exc:
         raise InputError(f"Biểu thức không hợp lệ: {text}") from exc
     unknown = expr.free_symbols - set(symbols)
     if unknown:
@@ -82,7 +84,7 @@ def parse_number(text: str) -> float:
     if expr.free_symbols or expr.is_real is False:
         raise InputError("Cần một số thực.")
     try:
-        value = float(sp.N(expr, 17))
+        value = parse_real(text)
     except (TypeError, ValueError, OverflowError) as exc:
         raise InputError("Không tính được số thực.") from exc
     if not math.isfinite(value):
@@ -905,13 +907,8 @@ SUPERSCRIPT = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
 
 
 def format_exact_or_decimal(value, precision=7, max_denominator=1000):
-    value = float(value)
-    fraction = Fraction(value).limit_denominator(min(max_denominator, 24))
-    tolerance = max(1e-12, 0.5 * 10 ** (-precision))
-    if abs(value - float(fraction)) <= tolerance and fraction.denominator != 1:
-        sign = "−" if fraction.numerator < 0 else ""
-        return f"{sign}{abs(fraction.numerator)}/{fraction.denominator}"
-    return format_number(value, precision)
+    del max_denominator
+    return format_number(float(value), precision)
 
 
 def format_exact_with_decimal(value, precision=7):

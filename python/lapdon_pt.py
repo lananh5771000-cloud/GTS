@@ -2,8 +2,10 @@ import sympy as sp
 import numpy as np
 import math
 import sys
+from exam_format import exam_print as print
 from dataclasses import dataclass
 from typing import Callable
+from input_utils import parse_math_expression, parse_real
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -119,6 +121,7 @@ def fixed_point(
     max_iter: int = 1000,
     samples: int = 2001,
     analytic_conditions_verified: bool = False,
+    fixed_iterations: int | None = None,
 ) -> FixedPointResult:
     """Lặp đơn với chặn hậu nghiệm Banach và nhãn chứng nhận trung thực."""
     if not all(math.isfinite(v) for v in (a, b, x0, epsilon)):
@@ -127,6 +130,9 @@ def fixed_point(
         raise ValueError("Cần a < b và x0 thuộc [a,b].")
     if epsilon <= 0 or max_iter <= 0 or samples < 2:
         raise ValueError("epsilon, max_iter và số mẫu phải hợp lệ.")
+
+    if fixed_iterations is not None and fixed_iterations < 0:
+        raise ValueError("fixed_iterations phai khong am.")
 
     grid = [a + (b - a) * i / (samples - 1) for i in range(samples)]
     images: list[float] = []
@@ -145,7 +151,16 @@ def fixed_point(
     x = x0
     rows: list[tuple[int, float, float, float | None, float | None]] = [(0, x, abs(phi(x) - x), None, None)]
     last_error = last_relative = None
-    for k in range(1, max_iter + 1):
+    if fixed_iterations == 0:
+        residual0 = abs(float(phi(x)) - x)
+        return FixedPointResult(
+            x, True, False,
+            "Da thuc hien dung k=0 buoc lap don; chua dung tieu chuan epsilon de chung nhan.",
+            q, mapping_ok, rows, None, None, residual0,
+            status="fixed_steps", invalid_contraction=not contraction_sampled,
+        )
+    loop_limit = fixed_iterations if fixed_iterations is not None else max_iter
+    for k in range(1, loop_limit + 1):
         new = float(phi(x))
         if not math.isfinite(new):
             return FixedPointResult(
@@ -178,6 +193,23 @@ def fixed_point(
             if relative
             else error is not None and error <= epsilon
         )
+        if fixed_iterations is not None:
+            if residual == 0.0:
+                return FixedPointResult(
+                    x, True, True, "Da gap diem bat dong chinh xac.", q, mapping_ok,
+                    rows, error, relative_error, residual, status="exact_solution",
+                )
+            if k >= fixed_iterations:
+                reason = (
+                    f"Da thuc hien dung k={fixed_iterations} buoc lap don; "
+                    "chua dung tieu chuan epsilon de chung nhan."
+                )
+                return FixedPointResult(
+                    x, True, certified_conditions and error is not None and error <= epsilon,
+                    reason, q, mapping_ok, rows, error, relative_error, residual,
+                    status="fixed_steps", invalid_contraction=not contraction_sampled,
+                )
+            continue
         if meets:
             if certified_conditions:
                 reason = "Đạt chặn sai số Banach; kết quả được chứng nhận."
@@ -257,7 +289,7 @@ def print_custom_algorithm(
         print(f"5. Điều kiện dừng: Lặp đủ {int(target_val)} lần.")
 
     print("6. Tiến trình lặp:")
-    print("   - Sử dụng công thức: x_{n+1} = \u03c6(x_n)")
+    print("   - Sử dụng công thức: xₙ₊₁ = φ(xₙ)")
     print("7. Kết luận:")
     print(f"   - Sau {final_n} bước lặp, tiêu chuẩn số đã chọn được thỏa mãn.")
     print(f"   - Nghiệm gần đúng cuối cùng: x \u2248 {final_xn:{fmt}}")
@@ -266,9 +298,9 @@ def print_custom_algorithm(
 
 def fixed_point_iteration(max_iter=10000):
     print("=== GIẢI PHƯƠNG TRÌNH BẰNG PHƯƠNG PHÁP LẶP ĐƠN (1 BIẾN) ===\n")
-    print("Input: phi(x), khoảng xét, x_0 và điều kiện dừng.")
+    print("Input: φ(x), khoảng xét, x₀ và điều kiện dừng.")
     print("Output: hệ số co q, bảng lặp, nghiệm gần đúng và chặn sai số.")
-    print("Công thức: x_(k+1)=phi(x_k).\n")
+    print("Công thức: x⁽ᵏ⁺¹⁾ = φ(x⁽ᵏ⁾).\n")
     x, pi_sym, e_sym = sp.symbols("x pi e")
 
     # 1. Nhập phương trình phi(x)
@@ -290,7 +322,7 @@ def fixed_point_iteration(max_iter=10000):
     if use_G == "y":
         G_name = input("Nhập ký hiệu của hàm đó (vd: V, S, F...): ").strip() or "G"
         g_input = input(f"Nhập biểu thức {G_name}(x) (vd: 1/6 * pi * x**3): ")
-        G_expr_raw = sp.sympify(g_input, locals={"pi": pi_sym, "e": e_sym})
+        G_expr_raw = parse_math_expression(g_input, {"x": x, "pi": pi_sym, "e": e_sym})
 
     # 3. Xử lý hằng số Pi, E
     combined_input = phi_input + " " + g_input
@@ -313,7 +345,7 @@ def fixed_point_iteration(max_iter=10000):
 
     # 4. Thay số và thiết lập hàm phi(x)
     try:
-        phi_expr = sp.sympify(phi_input, locals={"pi": pi_val, "e": e_val})
+        phi_expr = parse_math_expression(phi_input, {"x": x, "pi": sp.Float(pi_val), "e": sp.Float(e_val)})
         phi_prime = sp.diff(phi_expr, x)
 
         phi_prime_func = sp.lambdify(x, phi_prime, "numpy")
@@ -382,8 +414,8 @@ def fixed_point_iteration(max_iter=10000):
 
     # --- BƯỚC 1: KHOẢNG CÁCH LY & HỆ SỐ CO ---
     print("\n--- BƯỚC 1: KHOẢNG CÁCH LY VÀ HỆ SỐ CO q ---")
-    a = float(input("Nhập cận dưới a = "))
-    b = float(input("Nhập cận trên b = "))
+    a = parse_real(input("Nhập cận dưới a = "))
+    b = parse_real(input("Nhập cận trên b = "))
     if max_iter <= 0 or not (math.isfinite(a) and math.isfinite(b)) or not a < b:
         print("[X] Cần a < b hữu hạn và max_iter > 0.")
         return
@@ -410,7 +442,7 @@ def fixed_point_iteration(max_iter=10000):
 
     # --- BƯỚC 2: CHỌN ĐIỂM XUẤT PHÁT ---
     print("\n--- BƯỚC 2: CHỌN ĐIỂM XUẤT PHÁT x0 ---")
-    x0 = float(input(f"Nhập điểm xuất phát x0 nằm trong [{a}, {b}]: "))
+    x0 = parse_real(input(f"Nhập điểm xuất phát x0 nằm trong [{a}, {b}]: "))
     if not (a <= x0 <= b):
         print("[X] x0 nằm ngoài miền; dừng vì không có bảo đảm hội tụ.")
         return
@@ -426,10 +458,10 @@ def fixed_point_iteration(max_iter=10000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_abs"
         elif choice == "2":
-            target_val = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
             cond_type = "G_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -440,7 +472,7 @@ def fixed_point_iteration(max_iter=10000):
         print("3. Dừng theo số lần lặp cố định")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
-            target_val = float(input("Nhập sai số tuyệt đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
             # Dự đoán số bước
             if q < 1 and q > 0:
@@ -453,7 +485,7 @@ def fixed_point_iteration(max_iter=10000):
                             f"\n[Dự đoán] Theo sai số tiên nghiệm, cần khoảng {max(1, n_estimate)} bước lặp."
                         )
         elif choice == "2":
-            target_val = float(input("Nhập sai số tương đối epsilon = "))
+            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
             cond_type = "x_rel"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
@@ -467,9 +499,9 @@ def fixed_point_iteration(max_iter=10000):
     print("\n--- BƯỚC 4: QUÁ TRÌNH LẶP ---")
 
     if use_G == "y":
-        header = f"{'n':<3} | {'x_n':<15} | {'E_x (nếu co)':<18} | {G_name:<15} | {'B_G/XP_G':<15} | {'B_G tương đối':<15}"
+        header = f"{'n':<3} | {'xₙ':<15} | {'Eₓ (nếu co)':<18} | {G_name:<15} | {'Bᴳ/XPᴳ':<15} | {'Bᴳ tương đối':<15}"
     else:
-        header = f"{'n':<3} | {'x_n':<15} | {'Tiên nghiệm (\u0394x)':<18} | {'Hậu nghiệm (\u0394x)':<18} | {'Tương đối (\u03b4x)':<18}"
+        header = f"{'n':<3} | {'xₙ':<15} | {'Tiên nghiệm (Δx)':<18} | {'Hậu nghiệm (Δx)':<18} | {'Tương đối (δx)':<18}"
 
     print("-" * len(header))
     print(header)
@@ -607,4 +639,9 @@ def fixed_point_iteration(max_iter=10000):
 
 
 if __name__ == "__main__":
-    fixed_point_iteration()
+    try:
+        fixed_point_iteration()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

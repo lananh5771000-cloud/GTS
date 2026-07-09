@@ -1,8 +1,10 @@
 import sympy as sp
+from exam_format import exam_print as print
 import sys
 import math
 from dataclasses import dataclass
 from typing import Sequence
+from input_utils import parse_math_expression, parse_real
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -73,9 +75,9 @@ def chuong_trinh_sai_so():
     print("=" * 60)
     print(" CHƯƠNG TRÌNH GIẢI BÀI TOÁN SAI SỐ HÀM NHIỀU BIẾN ")
     print("=" * 60)
-    print("Input: f(x_1,...,x_n), giá trị gần đúng và sai số dữ liệu.")
+    print("Input: f(x₁,…,xₙ), giá trị gần đúng và sai số dữ liệu.")
     print("Output: sai số tuyệt đối/tương đối của f hoặc sai số cho phép của từng biến.")
-    print("Xấp xỉ bậc nhất: Δf ≈ Σ|∂f/∂x_i|Δx_i; δf≈Δf/|f|.")
+    print("Xấp xỉ bậc nhất: Δf ≈ Σ|∂f/∂xᵢ|Δxᵢ; δf ≈ Δf/|f|.")
     print("Muốn có chặn nghiêm ngặt phải chặn đạo hàm trên toàn miền sai số.\n")
 
     # 1. Nhập thông tin hàm và biến
@@ -95,13 +97,13 @@ def chuong_trinh_sai_so():
     for b in bien_list:
         local_dict[b.name] = b
 
-    f = sp.sympify(ham_str, locals=local_dict)
+    f = parse_math_expression(ham_str, {b.name: b for b in bien_list})
 
     # 2. Nhập giá trị các biến
     print("\n3. Nhập giá trị tại điểm đang xét:")
     gia_tri_dict = {}
     for bien in bien_list:
-        val = float(input(f"   Giá trị của {bien} = "))
+        val = parse_real(input(f"   Giá trị của {bien} = "))
         if not math.isfinite(val):
             raise ValueError("Giá trị đầu vào phải hữu hạn.")
         gia_tri_dict[bien] = val
@@ -129,7 +131,7 @@ def chuong_trinh_sai_so():
         print("Nhập sai số tuyệt đối (Δ) của từng biến:")
         sai_so_bien = {}
         for bien in bien_list:
-            sai_so_bien[bien] = float(input(f"   Δ{bien} = "))
+            sai_so_bien[bien] = parse_real(input(f"   Δ{bien} = "))
             if not math.isfinite(sai_so_bien[bien]) or sai_so_bien[bien] < 0:
                 raise ValueError("Sai số đầu vào phải không âm và hữu hạn.")
 
@@ -156,12 +158,12 @@ def chuong_trinh_sai_so():
         loai_sai_so = input("Chọn a hoặc b: ").lower()
 
         if loai_sai_so == "a":
-            target_delta_f = float(input("Nhập sai số tuyệt đối yêu cầu Δf = "))
+            target_delta_f = parse_real(input("Nhập sai số tuyệt đối yêu cầu Δf = "))
         else:
             if f_val == 0:
                 print("Không định nghĩa được sai số tương đối theo |f| vì giá trị trung tâm f = 0.")
                 return
-            target_delta_rel_f = float(input("Nhập sai số tương đối yêu cầu δf = "))
+            target_delta_rel_f = parse_real(input("Nhập sai số tương đối yêu cầu δf = "))
             target_delta_f = target_delta_rel_f * abs(f_val)
         if not math.isfinite(target_delta_f) or target_delta_f < 0:
             raise ValueError("Sai số mục tiêu phải không âm và hữu hạn.")

@@ -17,7 +17,10 @@ from khai_trien_ky_di_svd import svd_power
 from lapdon_pt import fixed_point
 from phantach_lu import multiply_matrices, plu_decomposition, plu_solve
 from tieptuyen import safeguarded_newton
-from tri_rieng_troi_xuong_thang import dominant_eigenpair, power_method
+from tri_rieng_troi_xuong_thang import (
+    dominant_eigenpair,
+    power_method,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -199,7 +202,6 @@ class TestEigenvalues(unittest.TestCase):
 class TestSVD(unittest.TestCase):
     def assert_svd(self, A, initial=None, expected_rank=None):
         result = svd_power(A, initial=initial, epsilon=1e-10, full_matrices=True)
-        reconstructed = result.U @ np.diag(result.singular_values, k=0) if False else None
         self.assertLess(result.relative_reconstruction_error, 1e-8)
         self.assertLess(result.left_orthogonality_error, 1e-8)
         self.assertLess(result.right_orthogonality_error, 1e-8)

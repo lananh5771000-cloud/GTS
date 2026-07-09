@@ -1,5 +1,10 @@
 import sys
+import contextlib
+import io
+from exam_format import exam_print as print
 from fractions import Fraction
+import sympy as sp
+from input_utils import MathInputError, parse_exact, split_number_row
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -48,17 +53,10 @@ def input_matrix_row(prompt, expected_count):
     2, -3, 0.25, 1/3, -5/7.
     """
     while True:
-        tokens = input(prompt).split()
-
-        if len(tokens) != expected_count:
-            print(
-                f"Lỗi: Dòng phải có đúng {expected_count} phần tử. Vui lòng nhập lại."
-            )
-            continue
-
         try:
-            return [Fraction(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+            tokens = split_number_row(input(prompt), expected_count)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, ZeroDivisionError):
             print(
                 "Lỗi: Chỉ nhập số nguyên, số thập phân hoặc phân số hợp lệ "
                 "(ví dụ 2, -3, 0.25, 1/3)."
@@ -79,14 +77,23 @@ def input_matrix(name, rows, columns):
 # ============================================================
 
 
+CURRENT_DECIMALS = 7
+
+
+def set_display_decimals(decimals):
+    global CURRENT_DECIMALS
+    CURRENT_DECIMALS = decimals
+
+
 def exact_number(value):
-    """Hiển thị Fraction dưới dạng số nguyên hoặc phân số."""
-    if value.denominator == 1:
-        return str(value.numerator)
-    return f"{value.numerator}/{value.denominator}"
+    """Hiển thị số dưới dạng thập phân để dễ chép vào bài."""
+    try:
+        return decimal_text(value, CURRENT_DECIMALS)
+    except (TypeError, ValueError):
+        return sp.sstr(sp.N(sp.simplify(value), CURRENT_DECIMALS + 3))
 
 
-def decimal_number(value, decimals):
+def decimal_text(value, decimals):
     """Định dạng số thập phân và loại bỏ -0.000."""
     number = float(value)
     threshold = 0.5 * 10 ** (-decimals) if decimals > 0 else 0.5
@@ -94,54 +101,55 @@ def decimal_number(value, decimals):
     if abs(number) < threshold:
         number = 0.0
 
-    return f"{number:12.{decimals}f}"
+    return f"{number:.{decimals}f}"
+
+
+def decimal_number(value, decimals, width=0):
+    text = decimal_text(value, decimals)
+    return text.rjust(width) if width else text
 
 
 def matrix_exact_lines(matrix):
-    """Chuyển ma trận thành các dòng căn cột theo dạng chính xác."""
-    if not matrix:
-        return ["[]"]
-
-    values = [[exact_number(value) for value in row] for row in matrix]
-
-    column_count = len(values[0])
-    widths = [
-        max(len(values[i][j]) for i in range(len(values))) for j in range(column_count)
-    ]
-
-    return [
-        "["
-        + "  ".join(values[i][j].rjust(widths[j]) for j in range(column_count))
-        + "]"
-        for i in range(len(values))
-    ]
+    """Chuyển ma trận thành các dòng thập phân căn cột."""
+    return matrix_decimal_lines(matrix, CURRENT_DECIMALS)
 
 
 def matrix_decimal_lines(matrix, decimals):
-    return [
-        "[" + "  ".join(decimal_number(value, decimals) for value in row) + "]"
-        for row in matrix
+    if not matrix:
+        return ["[]"]
+
+    values = [[decimal_text(value, decimals) for value in row] for row in matrix]
+    column_count = len(values[0])
+    min_width = max(decimals + 4, 8)
+    widths = [
+        max(min_width, max(len(values[i][j]) for i in range(len(values))))
+        for j in range(column_count)
     ]
+
+    lines = []
+    for row in values:
+        content = "  ".join(row[j].rjust(widths[j]) for j in range(column_count))
+        lines.append(f"[{content}]")
+    return lines
+
+
+def print_matrix_lines(lines, prefix=""):
+    if prefix:
+        print(prefix.rstrip())
+    padding = "  " if prefix else ""
+
+    for line in lines:
+        print(padding + line)
 
 
 def print_matrix_exact(matrix, prefix=""):
-    """In ma trận chính xác, tên ma trận nằm tại dòng giữa."""
-    lines = matrix_exact_lines(matrix)
-    middle = len(lines) // 2
-    padding = " " * len(prefix)
-
-    for i, line in enumerate(lines):
-        print((prefix if i == middle else padding) + line)
+    """In ma trận dạng thập phân, tên ma trận nằm tại dòng giữa."""
+    print_matrix_lines(matrix_exact_lines(matrix), prefix)
 
 
 def print_matrix_decimal(matrix, decimals, prefix=""):
     """In ma trận dưới dạng thập phân."""
-    lines = matrix_decimal_lines(matrix, decimals)
-    middle = len(lines) // 2
-    padding = " " * len(prefix)
-
-    for i, line in enumerate(lines):
-        print((prefix if i == middle else padding) + line)
+    print_matrix_lines(matrix_decimal_lines(matrix, decimals), prefix)
 
 
 def print_two_exact_matrices(left, right, left_name="A = ", right_name="B = "):
@@ -150,7 +158,7 @@ def print_two_exact_matrices(left, right, left_name="A = ", right_name="B = "):
     right_lines = matrix_exact_lines(right)
 
     row_count = max(len(left_lines), len(right_lines))
-    middle = row_count // 2
+    middle = (row_count - 1) // 2
     left_width = max(len(line) for line in left_lines)
 
     for i in range(row_count):
@@ -450,6 +458,29 @@ def matrices_equal(left, right):
     )
 
 
+def matrix_difference_norm_inf(left, right):
+    """Chuẩn vô cùng của hiệu hai ma trận: max_i sum_j |a_ij-b_ij|."""
+    if len(left) != len(right) or (left and len(left[0]) != len(right[0])):
+        raise ValueError("Hai ma trận phải cùng kích thước.")
+    if not left:
+        return 0.0
+    return max(
+        sum(abs(float(left[i][j] - right[i][j])) for j in range(len(left[0])))
+        for i in range(len(left))
+    )
+
+
+def print_inverse_check_errors(A, inverse, decimals):
+    identity = identity_matrix(len(A))
+    left_check = multiply_matrices(A, inverse)
+    right_check = multiply_matrices(inverse, A)
+    left_error = matrix_difference_norm_inf(left_check, identity)
+    right_error = matrix_difference_norm_inf(right_check, identity)
+    print("\nSai số kiểm tra:")
+    print(f"  ||A*A^(-1) - I||∞ = {left_error:.{decimals}e}")
+    print(f"  ||A^(-1)*A - I||∞ = {right_error:.{decimals}e}")
+
+
 def assemble_block_inverse(top_left, top_right, bottom_left, bottom_right):
     """
     Ghép:
@@ -525,7 +556,7 @@ def print_method_formula():
     print("  • Ma trận vuông A cấp n.")
     print("Output:")
     print("  • Ma trận nghịch đảo A^(-1), nếu A khả nghịch.")
-    print("  • Các khối viền, hệ số theta và phép kiểm tra hai phía.")
+    print("  • Các khối viền, hệ số θ và phép kiểm tra hai phía.")
     print("\nB1. Chia ma trận cấp n thành bốn khối:")
     print()
     print("             [A_(n-1)    A_12]")
@@ -536,14 +567,19 @@ def print_method_formula():
     print()
     print("  X      = A_(n-1)^(-1) * A_12")
     print("  Y      = A_21 * A_(n-1)^(-1)")
-    print("  theta  = A_22 - Y*A_12")
+    print("  θ      = A_22 - A_21 * A_(n-1)^(-1) * A_12")
+    print("         = A_22 - Y * A_12")
     print()
-    print("B3. Nếu theta != 0 thì:")
+    print("B3. Nếu θ ≠ 0 thì:")
     print()
-    print("  b_nn        = 1/theta")
-    print("  beta_12     = -X/theta")
-    print("  beta_21     = -Y/theta")
-    print("  B_(n-1)     = A_(n-1)^(-1) + X*Y/theta")
+    print("  b_nn        = 1/θ")
+    print("  beta_12     = -X * (1/θ)")
+    print("              = -A_(n-1)^(-1) * A_12 * (1/θ)")
+    print("  beta_21     = -(1/θ) * Y")
+    print("              = -(1/θ) * A_21 * A_(n-1)^(-1)")
+    print("  B_(n-1)     = A_(n-1)^(-1) + X * (1/θ) * Y")
+    print("              = A_(n-1)^(-1)")
+    print("                + A_(n-1)^(-1) * A_12 * (1/θ) * A_21 * A_(n-1)^(-1)")
     print()
     print("                    [B_(n-1)    beta_12]")
     print("  A_n^(-1)        = [                     ]")
@@ -552,7 +588,7 @@ def print_method_formula():
     print("B4. Ghép bốn khối để thu A_n^(-1), rồi tăng cấp và lặp lại.")
     print("\nĐiều kiện thực hiện ở mỗi cấp:")
     print("  - A_(n-1)^(-1) phải tồn tại.")
-    print("  - theta = A_22 - A_21*A_(n-1)^(-1)*A_12 != 0.")
+    print("  - θ = A_22 - A_21 * A_(n-1)^(-1) * A_12 ≠ 0.")
     print()
     print("Nếu A khả nghịch nhưng một ma trận con chính đầu bị suy biến,")
     print("ta được phép đổi độc lập thứ tự hàng và thứ tự cột:")
@@ -700,14 +736,14 @@ def bordering_inverse_recursive(A, symbol="A"):
     print(f"Y = A_21 * {symbol}_({order - 1})^(-1)")
     print_matrix_exact(Y, prefix="Y = ")
 
-    print("\n3. Tính theta:")
-    print("theta = A_22 - Y*A_12")
+    print("\n3. Tính θ:")
+    print("θ = A_22 - A_21*A_(n-1)^(-1)*A_12 = A_22 - Y*A_12")
     print(
-        f"theta = {exact_number(A22)} - {exact_number(Y_A12)} = {exact_number(theta)}"
+        f"θ = {exact_number(A22)} - {exact_number(Y_A12)} = {exact_number(theta)}"
     )
 
     if theta == 0:
-        print(f"\ntheta = 0 nên ma trận con chính đầu cấp {order} không khả nghịch.")
+        print(f"\nθ = 0 nên ma trận con chính đầu cấp {order} không khả nghịch.")
         return None, None, {"type": "zero_theta", "order": order}
 
     b_nn = Fraction(1, 1) / theta
@@ -721,22 +757,23 @@ def bordering_inverse_recursive(A, symbol="A"):
     determinant = determinant_previous * theta
 
     print("\n4. Tính các khối của ma trận nghịch đảo:")
-    print(f"b_{order},{order} = 1/theta = {exact_number(b_nn)}")
+    print(f"b_{order},{order} = 1/θ = {exact_number(b_nn)}")
 
-    print("\nbeta_12 = -X/theta:")
+    print("\nbeta_12 = -X*(1/θ) = -A_(n-1)^(-1)*A_12*(1/θ):")
     print_matrix_exact(beta_12, prefix="beta_12 = ")
 
-    print("\nbeta_21 = -Y/theta:")
+    print("\nbeta_21 = -(1/θ)*Y = -(1/θ)*A_21*A_(n-1)^(-1):")
     print_matrix_exact(beta_21, prefix="beta_21 = ")
 
-    print("\nB_(n-1) = A_(n-1)^(-1) + X*Y/theta:")
+    print("\nB_(n-1) = A_(n-1)^(-1) + X*(1/θ)*Y:")
+    print("        = A_(n-1)^(-1) + A_(n-1)^(-1)*A_12*(1/θ)*A_21*A_(n-1)^(-1)")
     print_matrix_exact(B_previous, prefix="B_(n-1) = ")
 
     print(f"\n5. Ghép các khối, thu được {symbol}_{order}^(-1):")
     print_matrix_exact(inverse, prefix=f"{symbol}_{order}^(-1) = ")
 
     print("\nQuan hệ định thức:")
-    print(f"det({symbol}_{order}) = det({symbol}_{order - 1})*theta")
+    print(f"det({symbol}_{order}) = det({symbol}_{order - 1})*θ")
     print(
         f"det({symbol}_{order}) "
         f"= ({exact_number(determinant_previous)})"
@@ -760,7 +797,8 @@ def bordering_inverse_recursive(A, symbol="A"):
 # ============================================================
 
 
-def find_inverse_by_bordering(A, decimals):
+def _find_inverse_by_bordering_verbose(A, decimals):
+    set_display_decimals(decimals)
     order = len(A)
     A_original = copy_matrix(A)
 
@@ -852,7 +890,7 @@ def find_inverse_by_bordering(A, decimals):
 
         print("\nĐịnh thức các ma trận con chính đầu của B:")
         for level, value in enumerate(permutation["leading_determinants"], start=1):
-            print(f"  det(B_{level}) = {exact_number(value)} != 0")
+            print(f"  det(B_{level}) = {exact_number(value)} ≠ 0")
 
         print("\nDo đó phương pháp viền quanh thực hiện được trên B.")
 
@@ -867,7 +905,7 @@ def find_inverse_by_bordering(A, decimals):
     if error is not None:
         raise ArithmeticError(
             "Dãy ma trận con chính đầu đã được chứng minh khả nghịch "
-            "nhưng công thức viền quanh vẫn gặp theta = 0."
+            "nhưng công thức viền quanh vẫn gặp θ = 0."
         )
 
     if needs_permutation:
@@ -896,11 +934,8 @@ def find_inverse_by_bordering(A, decimals):
     print("KẾT QUẢ CUỐI CÙNG")
     print("=" * 100)
 
-    print("\nMa trận nghịch đảo chính xác:")
+    print("\nMa trận nghịch đảo dạng thập phân:")
     print_matrix_exact(inverse, prefix="A^(-1) = ")
-
-    print(f"\nDạng thập phân ({decimals} chữ số sau dấu phẩy):")
-    print_matrix_decimal(inverse, decimals, prefix="A^(-1) ≈ ")
 
     print(f"\ndet(A) = {exact_number(determinant_A)}")
     print(f"Hạng của A: {order}")
@@ -931,6 +966,8 @@ def find_inverse_by_bordering(A, decimals):
     print_matrix_exact(right_check, prefix="A^(-1)*A = ")
 
     identity = identity_matrix(order)
+    left_error = matrix_difference_norm_inf(left_check, identity)
+    right_error = matrix_difference_norm_inf(right_check, identity)
 
     if matrices_equal(left_check, identity) and matrices_equal(right_check, identity):
         print("\nKẾT LUẬN: A khả nghịch và ma trận nghịch đảo tìm được là chính xác.")
@@ -938,6 +975,109 @@ def find_inverse_by_bordering(A, decimals):
     else:
         raise ArithmeticError("Kết quả viền quanh không vượt qua kiểm tra chính xác.")
 
+    print("\nSai số kiểm tra theo chuẩn vô cùng:")
+    print(f"  ||A*A^(-1) - I||∞ = {left_error:.{decimals}e}")
+    print(f"  ||A^(-1)*A - I||∞ = {right_error:.{decimals}e}")
+
+    return inverse
+
+
+def _print_exam_bordering_summary(A, inverse, decimals):
+    """Bản vừa đủ để chép: vẫn ghi đủ các khối ở từng lần viền."""
+    set_display_decimals(decimals)
+    order = len(A)
+    leading = leading_principal_determinants(A)
+    if any(value == 0 for value in leading):
+        permutation = complete_pivot_permutations(A)
+        if permutation is None:
+            return
+        working = permutation["B"]
+        print("Hoán vị để mọi ma trận con chính đầu đều khả nghịch: B=P A Q.")
+        print_matrix_exact(permutation["P"], prefix="P = ")
+        print_matrix_exact(permutation["Q"], prefix="Q = ")
+        print_matrix_exact(working, prefix="B = ")
+    else:
+        working = A
+        permutation = None
+
+    print("\nCông thức viền quanh:")
+    print("  Với A_n = [[A_(n-1), c], [r, a_nn]], trong đó c=A_12 là cột, r=A_21 là hàng.")
+    print("  X = A_(n-1)^(-1) * c")
+    print("  Y = r * A_(n-1)^(-1)")
+    print("  θ = a_nn - r * A_(n-1)^(-1) * c = a_nn - Y*c")
+    print("  Nếu θ ≠ 0 thì:")
+    print("    khối trên-trái  = A_(n-1)^(-1) + X*(1/θ)*Y")
+    print("                    = A_(n-1)^(-1) + A_(n-1)^(-1)*c*(1/θ)*r*A_(n-1)^(-1)")
+    print("    khối trên-phải  = -X*(1/θ) = -A_(n-1)^(-1)*c*(1/θ)")
+    print("    khối dưới-trái  = -(1/θ)*Y = -(1/θ)*r*A_(n-1)^(-1)")
+    print("    khối dưới-phải  = 1/θ")
+    print("  A_n^(-1) = [[khối trên-trái, khối trên-phải],")
+    print("              [khối dưới-trái, khối dưới-phải]].")
+    current_inverse = [[Fraction(1, 1) / working[0][0]]]
+    print_matrix_exact([[working[0][0]]], prefix="A₁ = ")
+    print_matrix_exact(current_inverse, prefix="A₁⁻¹ = ")
+    for level in range(2, order + 1):
+        current = leading_principal_submatrix(working, level)
+        column = column_matrix([working[i][level - 1] for i in range(level - 1)])
+        row = row_matrix(working[level - 1][: level - 1])
+        x = multiply_matrices(current_inverse, column)
+        y = multiply_matrices(row, current_inverse)
+        theta = working[level - 1][level - 1] - multiply_matrices(y, column)[0][0]
+        reciprocal = Fraction(1, 1) / theta
+        top_right = scalar_multiply(x, -reciprocal)
+        bottom_left = scalar_multiply(y, -reciprocal)
+        top_left = add_matrices(
+            current_inverse,
+            scalar_multiply(multiply_matrices(x, y), reciprocal),
+        )
+        next_inverse = assemble_block_inverse(
+            top_left, top_right, bottom_left, reciprocal
+        )
+        print(f"\nBước viền cấp {level - 1} → {level}:")
+        print_matrix_exact(current, prefix=f"A_{level} = ")
+        print_matrix_exact(current_inverse, prefix=f"A_{level - 1}⁻¹ = ")
+        print_matrix_exact(column, prefix="c = ")
+        print_matrix_exact(row, prefix="r = ")
+        print(f"θ = {exact_number(theta)}; 1/θ = {exact_number(reciprocal)}")
+        print_matrix_exact(top_left, prefix="khối trên-trái = ")
+        print_matrix_exact(top_right, prefix="khối trên-phải = ")
+        print_matrix_exact(bottom_left, prefix="khối dưới-trái = ")
+        print_matrix_exact([[reciprocal]], prefix="khối dưới-phải = ")
+        print_matrix_exact(next_inverse, prefix=f"A_{level}⁻¹ = ")
+        current_inverse = next_inverse
+
+    print("\nKết quả theo đúng thứ tự ban đầu:")
+    print_matrix_decimal(inverse, decimals, prefix="A⁻¹ ≈ ")
+    print_matrix_decimal(multiply_matrices(A, inverse), decimals, prefix="AA⁻¹ ≈ ")
+    print_matrix_decimal(multiply_matrices(inverse, A), decimals, prefix="A⁻¹A ≈ ")
+    print_inverse_check_errors(A, inverse, decimals)
+
+
+def _print_bordering_result_only(A, inverse, decimals):
+    set_display_decimals(decimals)
+    print_matrix_decimal(inverse, decimals, prefix="A⁻¹ ≈ ")
+    print_matrix_decimal(multiply_matrices(A, inverse), decimals, prefix="AA⁻¹ ≈ ")
+    print_matrix_decimal(multiply_matrices(inverse, A), decimals, prefix="A⁻¹A ≈ ")
+    print_inverse_check_errors(A, inverse, decimals)
+
+
+def find_inverse_by_bordering(A, decimals, output_mode="full"):
+    """Tìm nghịch đảo với ba mức in: full, exam hoặc result."""
+    set_display_decimals(decimals)
+    if output_mode not in {"full", "exam", "result"}:
+        raise ValueError("output_mode phải là 'full', 'exam' hoặc 'result'.")
+    if output_mode == "full":
+        return _find_inverse_by_bordering_verbose(A, decimals)
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        inverse = _find_inverse_by_bordering_verbose(A, decimals)
+    if inverse is None:
+        print(buffer.getvalue().rstrip())
+        return None
+    if output_mode == "exam":
+        _print_exam_bordering_summary(A, inverse, decimals)
+    else:
+        _print_bordering_result_only(A, inverse, decimals)
     return inverse
 
 
@@ -963,8 +1103,16 @@ def main():
         "\nNhập số chữ số sau dấu phẩy muốn hiển thị [Enter = 7]: ",
         default=7,
     )
+    print("\nChế độ in:")
+    print("1. Đầy đủ mọi đại lượng trung gian")
+    print("2. Bản vừa đủ để chép bài thi")
+    print("3. Chỉ kết quả và phép kiểm tra")
+    mode_choice = input("Chọn [2]: ").strip() or "2"
+    output_mode = {"1": "full", "2": "exam", "3": "result"}.get(mode_choice)
+    if output_mode is None:
+        raise ValueError("Chế độ in không hợp lệ.")
 
-    find_inverse_by_bordering(A, decimals)
+    find_inverse_by_bordering(A, decimals, output_mode=output_mode)
 
 
 if __name__ == "__main__":

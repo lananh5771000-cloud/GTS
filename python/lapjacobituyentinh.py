@@ -16,8 +16,9 @@ Mục tiêu của chương trình:
 from __future__ import annotations
 
 import math
+from exam_format import exam_print as print
 import sys
-from fractions import Fraction
+from input_utils import MathInputError, parse_real, split_number_row
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -44,7 +45,7 @@ def read_number(text: str) -> float:
         s = s.replace(",", ".")
 
     try:
-        value = float(Fraction(s)) if "/" in s else float(s)
+        value = parse_real(s)
     except (ValueError, ZeroDivisionError, OverflowError) as exc:
         raise ValueError("số không hợp lệ") from exc
 
@@ -103,17 +104,10 @@ def ask_choice(
 
 def ask_row(prompt: str, length: int) -> List[float]:
     while True:
-        raw = input(prompt).strip()
-        # Cho phép người dùng dán hàng có ngoặc vuông/ngoặc tròn.
-        for ch in "[](){};":
-            raw = raw.replace(ch, " ")
-        parts = raw.split()
-        if len(parts) != length:
-            print(f"Phải nhập đúng {length} phần tử, cách nhau bởi khoảng trắng.")
-            continue
         try:
+            parts = split_number_row(input(prompt), length)
             return [read_number(part) for part in parts]
-        except ValueError as exc:
+        except (MathInputError, ValueError) as exc:
             print(f"Dữ liệu không hợp lệ: {exc}. Vui lòng nhập lại.")
 
 
@@ -156,17 +150,10 @@ def format_display_number(value: float, decimals: int = 6, scale: float = 1.0) -
 
 
 def format_formula_number(value: float, precision: int = 8) -> str:
-    """Ưu tiên phân số đơn giản trong công thức; nếu không thì dùng thập phân."""
+    """Định dạng số trong công thức bằng thập phân."""
     value = float(value)
     if _is_effectively_zero(value, max(abs(value), np.finfo(float).tiny)):
         return "0"
-
-    frac = Fraction(value).limit_denominator(10000)
-    tolerance = 1e-12 * max(abs(value), np.finfo(float).tiny)
-    if frac.numerator != 0 and abs(float(frac) - value) <= tolerance:
-        if frac.denominator == 1:
-            return str(frac.numerator)
-        return f"{frac.numerator}/{frac.denominator}"
 
     return f"{value:.{max(6, precision)}g}"
 
@@ -581,7 +568,7 @@ def jacobi_solve(
     )
 
     # X^(0) đã là điểm bất động.
-    if bool(history[0]["exact_fixed_point"]):
+    if bool(history[0]["exact_fixed_point"]) and stop_mode != "fixed":
         prepared.update(
             {
                 "status": "converged_exact",
@@ -671,10 +658,10 @@ def jacobi_solve(
         )
         X = X_next
 
-        if exact_fixed_point:
-            status = "converged_exact"
-        elif stop_mode == "fixed" and k >= int(target_steps):
+        if stop_mode == "fixed" and k >= int(target_steps):
             status = "fixed_steps"
+        elif exact_fixed_point and stop_mode != "fixed":
+            status = "converged_exact"
         elif stop_mode == "apriori" and k >= int(target_steps):
             status = "converged"
         elif (
@@ -701,6 +688,114 @@ def jacobi_solve(
         }
     )
     return prepared
+
+
+def jacobi_fixed_point(
+    B: np.ndarray,
+    d: np.ndarray,
+    x0: Optional[np.ndarray] = None,
+    *,
+    stop_mode: str = "epsilon",
+    epsilon: float = 1e-8,
+    fixed_steps: int = 0,
+    max_iter: int = 10000,
+    norm_kind: str = "inf",
+) -> Dict[str, object]:
+    """Jacobi trực tiếp cho x^(k+1)=B x^(k)+d, không chuyển về Ax=b."""
+    B = np.asarray(B, dtype=float)
+    d = np.asarray(d, dtype=float).reshape(-1)
+    if B.ndim != 2 or B.shape[0] != B.shape[1] or B.shape[0] == 0:
+        raise ValueError("B phải là ma trận vuông khác rỗng")
+    n = B.shape[0]
+    if d.shape != (n,):
+        raise ValueError("d phải là vector có đúng n phần tử")
+    if x0 is None:
+        x = np.zeros(n, dtype=float)
+    else:
+        x = np.asarray(x0, dtype=float).reshape(-1)
+    if x.shape != (n,):
+        raise ValueError("x^(0) phải là vector có đúng n phần tử")
+    if not all(np.all(np.isfinite(item)) for item in (B, d, x)):
+        raise ValueError("mọi dữ liệu phải hữu hạn")
+    if norm_kind not in {"inf", "one", "two"}:
+        raise ValueError("chuẩn phải là inf, one hoặc two")
+    if stop_mode not in {"epsilon", "fixed"}:
+        raise ValueError("stop_mode phải là epsilon hoặc fixed")
+    if stop_mode == "epsilon" and epsilon <= 0:
+        raise ValueError("ε phải dương")
+    if fixed_steps < 0 or max_iter <= 0:
+        raise ValueError("số bước và max_iter không hợp lệ")
+
+    order = {"inf": np.inf, "one": 1, "two": 2}[norm_kind]
+    q = float(np.linalg.norm(B, order))
+
+    def residual(vector: np.ndarray) -> np.ndarray:
+        return vector - B @ vector - d
+
+    history: List[Dict[str, object]] = [
+        {
+            "k": 0,
+            "x": x.copy(),
+            "diff_norm": None,
+            "error_bound": None,
+            "residual_norm": float(np.linalg.norm(residual(x), order)),
+        }
+    ]
+    target = fixed_steps if stop_mode == "fixed" else max_iter
+    status = "max_iter"
+    certified = False
+
+    if stop_mode == "epsilon" and history[0]["residual_norm"] <= epsilon:
+        return {
+            "status": "converged_exact",
+            "certified": True,
+            "x": x,
+            "history": history,
+            "q": q,
+            "norm_kind": norm_kind,
+            "epsilon": epsilon,
+            "fixed_steps": fixed_steps,
+        }
+
+    for k in range(1, target + 1):
+        x_next = B @ x + d
+        if not np.all(np.isfinite(x_next)):
+            status = "invalid_value"
+            break
+        diff_norm = float(np.linalg.norm(x_next - x, order))
+        residual_norm = float(np.linalg.norm(residual(x_next), order))
+        error_bound = q / (1.0 - q) * diff_norm if q < 1.0 else math.inf
+        history.append(
+            {
+                "k": k,
+                "x": x_next.copy(),
+                "diff_norm": diff_norm,
+                "error_bound": error_bound,
+                "residual_norm": residual_norm,
+            }
+        )
+        x = x_next
+        if stop_mode == "fixed":
+            if k >= fixed_steps:
+                status = "fixed_steps"
+                certified = q < 1.0 and error_bound <= epsilon and residual_norm <= epsilon
+                break
+            continue
+        if q < 1.0 and error_bound <= epsilon and residual_norm <= epsilon:
+            status = "converged"
+            certified = True
+            break
+
+    return {
+        "status": status,
+        "certified": certified,
+        "x": x,
+        "history": history,
+        "q": q,
+        "norm_kind": norm_kind,
+        "epsilon": epsilon,
+        "fixed_steps": fixed_steps,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -1174,20 +1269,153 @@ def print_solution(
         print_matrix(solution_label, X_final, decimals)
 
 
+def print_direct_jacobi_result(
+    B: np.ndarray,
+    d: np.ndarray,
+    result: Dict[str, object],
+    decimals: int,
+) -> None:
+    B = np.asarray(B, dtype=float)
+    d = np.asarray(d, dtype=float).reshape(-1)
+    history: List[Dict[str, object]] = list(result["history"])
+    norm_kind = str(result["norm_kind"])
+    p_symbol = {"inf": "∞", "one": "1", "two": "2"}[norm_kind]
+    q = float(result["q"])
+
+    print("\n1. JACOBI TRỰC TIẾP CHO x^(k+1)=B x^(k)+d")
+    print("Không chuyển bài toán về Ax=b; mọi thành phần của x^(k+1) dùng x^(k).")
+    print_matrix("B", B, decimals)
+    print_matrix("d", d[:, None], decimals)
+    print("Công thức tổng quát:")
+    print("  x_i^(k+1) = d_i + Σ_(j=1..n) b_ij x_j^(k),  i=1..n.")
+    print(f"Chuẩn kiểm tra: ‖.‖_{p_symbol}; q = ‖B‖_{p_symbol} = {_sig(q)}.")
+    if q < 1.0:
+        print("Vì q < 1 nên phép lặp được chứng nhận co trong chuẩn đã chọn.")
+    else:
+        print("q ≥ 1 nên chưa có chứng nhận co; chỉ báo cáo kết quả và residual.")
+
+    print("\n2. CÁC BƯỚC LẶP")
+    headers = ["k"] + [f"x_{i + 1}^(k)" for i in range(B.shape[0])] + [
+        f"‖x^(k)-x^(k-1)‖_{p_symbol}",
+        f"‖x^(k)-B x^(k)-d‖_{p_symbol}",
+    ]
+    rows: List[List[str]] = []
+    for item in history:
+        x = np.asarray(item["x"], dtype=float).reshape(-1)
+        diff = item["diff_norm"]
+        residual = float(item["residual_norm"])
+        rows.append(
+            [
+                str(int(item["k"])),
+                *[format_display_number(value, decimals) for value in x],
+                "-" if diff is None else _sig(float(diff)),
+                _sig(residual),
+            ]
+        )
+    widths = [max(len(headers[j]), *(len(row[j]) for row in rows)) for j in range(len(headers))]
+    print("  " + " | ".join(headers[j].rjust(widths[j]) for j in range(len(headers))))
+    print("  " + "-+-".join("-" * width for width in widths))
+    for row in rows:
+        print("  " + " | ".join(row[j].rjust(widths[j]) for j in range(len(row))))
+
+    last = history[-1]
+    last_k = int(last["k"])
+    print("\n3. KẾT LUẬN")
+    print_matrix(f"x^({last_k})", np.asarray(last["x"], dtype=float)[:, None], decimals)
+    print(f"Residual điểm bất động = {_sig(float(last['residual_norm']))}.")
+    status = str(result["status"])
+    if status == "fixed_steps":
+        print(f"KẾT LUẬN: đã thực hiện đúng {last_k} bước theo yêu cầu.")
+    elif bool(result["certified"]):
+        print(
+            f"KẾT LUẬN: đạt ε = {_sig(float(result['epsilon']))} "
+            "và được chứng nhận nhờ q < 1."
+        )
+    elif status == "converged_exact":
+        print("KẾT LUẬN: x^(0) đã là điểm bất động trong số học máy.")
+    elif status == "invalid_value":
+        print("KẾT LUẬN: phép lặp sinh giá trị không hợp lệ, không chứng nhận kết quả.")
+    else:
+        print("KẾT LUẬN: chưa đủ điều kiện chứng nhận đạt ε trong giới hạn bước.")
+
+
 # -----------------------------------------------------------------------------
 # 6. GIAO DIỆN CHẠY
 # -----------------------------------------------------------------------------
 
 
 def main() -> None:
-    print("GIẢI AX=B / TÌM A^(-1) BẰNG PHƯƠNG PHÁP LẶP JACOBI")
-    print("Các phần tử trong một hàng được nhập cách nhau bởi khoảng trắng.")
+    print("GIẢI AX=B / JACOBI TRỰC TIẾP BẰNG PHƯƠNG PHÁP LẶP JACOBI")
+    print("Các phần tử trong một hàng có thể cách nhau bởi khoảng trắng, dấu phẩy hoặc dấu chấm phẩy.")
     print("Có thể nhập số dạng 0.25, 0,25, 1/4 hoặc 2e-3.\n")
 
     task_mode = ask_choice(
-        "1. Giải hệ AX=B\n2. Tìm ma trận nghịch đảo A^(-1)\nChọn",
-        ("1", "2"),
+        "1. Giải hệ AX=B\n"
+        "2. Tìm ma trận nghịch đảo A^(-1)\n"
+        "3. Jacobi trực tiếp cho x^(k+1)=B x^(k)+d\n"
+        "Chọn",
+        ("1", "2", "3"),
     )
+    if task_mode == 3:
+        n_direct = int(ask_number("Cấp n", positive=True, integer=True))
+        B_direct = ask_matrix("B", n_direct, n_direct)
+        d_direct = np.asarray(ask_row(f"Nhập vector d gồm {n_direct} phần tử: ", n_direct), dtype=float)
+        x0_choice = ask_choice(
+            "1. Dùng x^(0)=0\n2. Tự nhập x^(0)\nChọn",
+            ("1", "2"),
+            default="1",
+        )
+        x0_direct = (
+            np.zeros(n_direct, dtype=float)
+            if x0_choice == 1
+            else np.asarray(ask_row(f"Nhập x^(0) gồm {n_direct} phần tử: ", n_direct), dtype=float)
+        )
+        stop_choice = ask_choice(
+            "1. Thực hiện đúng k bước\n2. Lặp đến ε\nChọn",
+            ("1", "2"),
+            default="1",
+        )
+        if stop_choice == 1:
+            fixed_steps = int(ask_number("Số bước k", nonnegative=True, integer=True))
+            epsilon = 1e-12
+            max_iter = max(1, fixed_steps)
+            stop_mode = "fixed"
+        else:
+            epsilon = float(ask_number("Sai số ε", positive=True, default=1e-8))
+            max_iter = int(ask_number("max_iter", positive=True, integer=True, default=10000))
+            fixed_steps = 0
+            stop_mode = "epsilon"
+        norm_choice = ask_choice(
+            "1. Chuẩn vô cùng\n2. Chuẩn 1\n3. Chuẩn 2\nChọn",
+            ("1", "2", "3"),
+            default="1",
+        )
+        norm_kind = {1: "inf", 2: "one", 3: "two"}[norm_choice]
+        decimals = int(
+            ask_number(
+                "Số chữ số sau dấu phẩy dùng để trình bày",
+                nonnegative=True,
+                integer=True,
+                default=7,
+            )
+        )
+        try:
+            result = jacobi_fixed_point(
+                B_direct,
+                d_direct,
+                x0_direct,
+                stop_mode=stop_mode,
+                epsilon=epsilon,
+                fixed_steps=fixed_steps,
+                max_iter=max_iter,
+                norm_kind=norm_kind,
+            )
+        except ValueError as exc:
+            print(f"Không thể thực hiện: {exc}")
+            return
+        print_direct_jacobi_result(B_direct, d_direct, result, decimals)
+        return
+
     n = int(ask_number("Cấp n của ma trận A", positive=True, integer=True))
     A = ask_matrix("A", n, n)
 
@@ -1288,4 +1516,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

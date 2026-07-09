@@ -17,7 +17,9 @@ from __future__ import annotations
 import math
 import sys
 from dataclasses import dataclass
-from fractions import Fraction
+from input_utils import MathInputError, parse_real as parse_input_real, split_number_row
+
+from exam_format import exam_print as print, indexed, iteration, norm, transpose
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -41,7 +43,7 @@ def parse_real(token: str) -> float:
     token = token.strip()
     if "," in token and "." not in token:
         token = token.replace(",", ".")
-    value = float(Fraction(token))
+    value = parse_input_real(token)
     if not math.isfinite(value):
         raise ValueError
     return value
@@ -78,13 +80,10 @@ def input_float(prompt: str, default: float | None = None) -> float:
 
 def input_row(prompt: str, size: int) -> Vector:
     while True:
-        tokens = input(prompt).split()
-        if len(tokens) != size:
-            print(f"  Lỗi: dòng phải có đúng {size} số.")
-            continue
         try:
+            tokens = split_number_row(input(prompt), size)
             return [parse_real(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+        except (MathInputError, ValueError, ZeroDivisionError):
             print("  Lỗi: chỉ nhập số thực hoặc phân số hợp lệ, cách nhau bằng dấu cách.")
 
 
@@ -185,6 +184,68 @@ def matrix_frobenius_norm(a: Matrix) -> float:
     return math.sqrt(math.fsum(value * value for row in a for value in row))
 
 
+def relative_residual_norm(a: Matrix, eigenvalue: float, x: Vector) -> float:
+    """Residual tuong doi dung mau so max(1, ||A||_2 gan dung bang Frobenius, |lambda|)."""
+    return residual_norm(a, eigenvalue, x) / max(1.0, matrix_frobenius_norm(a), abs(eigenvalue))
+
+
+def transpose_matrix(a: Matrix) -> Matrix:
+    return [list(row) for row in zip(*a)]
+
+
+def outer_product(x: Vector, y: Vector) -> Matrix:
+    return [[xi * yj for yj in y] for xi in x]
+
+
+def spectral_condition(a: Matrix, tolerance: float = 1e-8) -> SpectralCondition:
+    """Nhan dien cac ca phuong phap luy thua co ban can canh bao.
+
+    Ham nay chi dung da thuc dac trung/SymPy de canh bao dieu kien ap dung,
+    khong dung lam loi de tra ve vector rieng.
+    """
+    try:
+        import sympy as sp
+
+        matrix = sp.Matrix(a)
+        roots = []
+        for root, multiplicity in matrix.eigenvals().items():
+            roots.extend([complex(sp.N(root, 30))] * int(multiplicity))
+        if not roots:
+            variable = sp.Symbol("lambda")
+            roots = [
+                complex(root)
+                for root in sp.nroots(matrix.charpoly(variable).as_expr(), n=30, maxsteps=200)
+            ]
+    except Exception:
+        return SpectralCondition(False, False, False, 0.0, 0, "")
+
+    if not roots:
+        return SpectralCondition(True, False, False, 0.0, 0, "Ma tran khong co pho huu han de xet.")
+
+    moduli = [abs(root) for root in roots]
+    dominant_modulus = max(moduli)
+    scale = max(1.0, dominant_modulus)
+    on_circle = [
+        root for root in roots if abs(abs(root) - dominant_modulus) <= tolerance * scale
+    ]
+    complex_dominant = any(abs(root.imag) > tolerance * scale for root in on_circle)
+    unique = len(on_circle) == 1 and not complex_dominant
+
+    warning = ""
+    if complex_dominant:
+        warning = (
+            "Không tìm được trị riêng thực trội. "
+            "Phuong phap luy thua thuc co ban khong phu hop de tach truc tiep "
+            "cap tri rieng phuc troi."
+        )
+    elif not unique:
+        warning = (
+            "Phuong phap luy thua co ban khong du dieu kien tach tri rieng troi "
+            "duy nhat theo modun."
+        )
+    return SpectralCondition(True, unique, complex_dominant, dominant_modulus, len(on_circle), warning)
+
+
 # =============================================================================
 # ĐỊNH DẠNG KẾT QUẢ
 # =============================================================================
@@ -262,6 +323,8 @@ class PowerResult:
     residual: float
     relative_residual: float
     stop_reason: str
+    initial_vector: Vector | None = None
+    warning: str = ""
 
 
 @dataclass
@@ -269,6 +332,16 @@ class DominantSearchResult:
     result: PowerResult
     attempts: list[PowerResult]
     dominant_certified: bool
+    warning: str
+
+
+@dataclass
+class SpectralCondition:
+    known: bool
+    unique_dominant: bool
+    complex_dominant: bool
+    dominant_modulus: float
+    count_on_dominant_circle: int
     warning: str
 
 
@@ -291,6 +364,9 @@ def power_method(
     fixed_iterations: int,
     epsilon: float,
     maximum_iterations: int,
+    *,
+    norm_kind: str = "inf",
+    quotient: str = "rayleigh",
 ) -> PowerResult:
     n = len(a)
     if n == 0 or any(len(row) != n for row in a):
@@ -311,8 +387,23 @@ def power_method(
 
     for k in range(1, limit + 1):
         y = mat_vec(a, x)
-        alpha, x_new = component_normalize(y)
+        if norm_kind == "2":
+            alpha = norm2(y)
+            if alpha == 0.0:
+                raise ArithmeticError("A*X bang vector 0; khong the tiep tuc phuong phap luy thua.")
+            x_new = [value / alpha for value in y]
+        elif norm_kind == "inf":
+            alpha, x_new = component_normalize(y)
+        else:
+            raise ValueError("norm_kind chi nhan 'inf' hoac '2'.")
         rayleigh = rayleigh_quotient(a, x_new)
+        if quotient == "component":
+            pivot = max(range(n), key=lambda i: abs(x[i]))
+            if abs(x[pivot]) <= sys.float_info.epsilon:
+                raise ArithmeticError("Khong duoc chia cho thanh phan bang 0 khi dung ti so thanh phan.")
+            rayleigh = y[pivot] / x[pivot]
+        elif quotient != "rayleigh":
+            raise ValueError("quotient chi nhan 'rayleigh' hoac 'component'.")
 
         # Hai vector riêng x và -x biểu diễn cùng một hướng.
         direct_change = norm2(subtract_vectors(x_new, x))
@@ -326,13 +417,7 @@ def power_method(
         records.append(Iteration(k, y, alpha, x_new, rayleigh, delta, residual))
         x = x_new
 
-        current_norm = norm2(x_new)
-        denominator = (
-            matrix_frobenius_norm(a) * current_norm
-            + abs(rayleigh) * current_norm
-            + sys.float_info.min
-        )
-        relative_residual = residual / denominator
+        relative_residual = residual / max(1.0, matrix_frobenius_norm(a), abs(rayleigh))
         if fixed_iterations == 0 and relative_residual <= epsilon:
             converged = True
             stop_reason = f"phần dư đã thỏa ||BX - λX||₂ <= ε = {epsilon:.3e}"
@@ -343,12 +428,7 @@ def power_method(
         raise ArithmeticError("Không tạo được bước lặp nào.")
     eigenvalue = rayleigh_quotient(a, unit_vector)
     residual = residual_norm(a, eigenvalue, unit_vector)
-    denominator = (
-        matrix_frobenius_norm(a) * norm2(unit_vector)
-        + abs(eigenvalue) * norm2(unit_vector)
-        + sys.float_info.min
-    )
-    relative_residual = residual / denominator
+    relative_residual = residual / max(1.0, matrix_frobenius_norm(a), abs(eigenvalue))
 
     if fixed_iterations > 0:
         converged = relative_residual <= epsilon
@@ -363,6 +443,7 @@ def power_method(
         residual=residual,
         relative_residual=relative_residual,
         stop_reason=stop_reason,
+        initial_vector=[float(value) for value in x0],
     )
 
 
@@ -379,6 +460,9 @@ def dominant_eigenpair(
     n = len(a)
     if n == 0 or any(len(row) != n for row in a):
         raise ValueError("A phải là ma trận vuông khác rỗng.")
+    condition = spectral_condition(a)
+    if condition.known and condition.complex_dominant:
+        raise ArithmeticError(condition.warning)
     candidates: list[Vector] = []
     if x0 is not None and len(x0) == n and norm2(x0) > 0:
         candidates.append([float(value) for value in x0])
@@ -413,53 +497,66 @@ def dominant_eigenpair(
     best = max(valid, key=lambda item: (abs(item.eigenvalue), -item.relative_residual))
     values = [item.eigenvalue for item in valid]
     spread = max((abs(abs(v) - abs(best.eigenvalue)) for v in values), default=0.0)
+    dominant_certified = unique_dominant_verified
     warning = ""
-    if not unique_dominant_verified:
+    if condition.known and condition.warning:
+        warning = condition.warning
+    elif not dominant_certified:
         warning = (
             "Đã thử nhiều vector đầu và chọn trị riêng có môđun lớn nhất quan sát được; "
             "điều này không thay thế chứng minh trị riêng trội duy nhất."
         )
     if spread > max(epsilon * max(abs(best.eigenvalue), sys.float_info.min), 1e-8 * abs(best.eigenvalue)):
         warning += " Các vector đầu đã hội tụ tới những trị riêng khác nhau."
-    return DominantSearchResult(best, attempts, unique_dominant_verified, warning.strip())
+    if x0 is not None and attempts and attempts[0].converged:
+        first = attempts[0]
+        if abs(abs(first.eigenvalue) - abs(best.eigenvalue)) > max(1e-8, epsilon) * max(1.0, abs(best.eigenvalue)):
+            warning += " Vector dau ban dau khong phu hop; da thu cac vector e1, e2, ..., vector toan 1 va vector xac dinh khac."
+    best.warning = warning.strip()
+    return DominantSearchResult(best, attempts, dominant_certified, warning.strip())
 
 
 def print_power_theory() -> None:
     print_section("A. THUẬT TOÁN PHƯƠNG PHÁP LŨY THỪA")
     print("Input:")
     print("  • Ma trận vuông B cấp n có một trị riêng trội về môđun.")
-    print("  • Vector khởi đầu X^(0) khác 0 và có thành phần theo vector riêng trội.")
-    print("  • Số vòng lặp k, hoặc sai số ε và số vòng lặp tối đa k_max.")
+    print("  • Vector khởi đầu X⁽⁰⁾ khác 0 và có thành phần theo vector riêng trội.")
+    print("  • Số vòng lặp k, hoặc sai số ε và số vòng lặp tối đa kₘₐₓ.")
     print("Output:")
     print("  • Trị riêng trội gần đúng λ và vector riêng v được đưa về chuẩn 2 bằng 1.")
     print("Các bước:")
-    print("  B1. Tính Y^(k) = B X^(k-1).")
-    print("  B2. Chọn p sao cho |y_p^(k)| = max_i |y_i^(k)| và đặt α_k = y_p^(k).")
-    print("  B3. Chuẩn hóa X^(k) = Y^(k)/α_k.")
-    print("  B4. α_k chỉ là hệ số chuẩn hóa, không dùng làm trị riêng cuối.")
+    print("  B1. Tính Y⁽ᵏ⁾ = BX⁽ᵏ⁻¹⁾.")
+    print("  B2. Chọn p sao cho |yₚ⁽ᵏ⁾| = maxᵢ|yᵢ⁽ᵏ⁾| và đặt αₖ = yₚ⁽ᵏ⁾.")
+    print("  B3. Chuẩn hóa X⁽ᵏ⁾ = Y⁽ᵏ⁾/αₖ.")
+    print("  B4. αₖ chỉ là hệ số chuẩn hóa, không dùng làm trị riêng cuối.")
     print("  B5. Ước lượng trị riêng bằng thương Rayleigh:")
-    print("                λ_R^(k) = (X^(k))^T B X^(k) / (X^(k))^T X^(k).")
-    print("  B6. Kiểm tra phần dư r^(k) = B X^(k) - λ_R^(k) X^(k).")
-    print("  B7. Cuối cùng đặt v = X^(k)/||X^(k)||₂ để ||v||₂ = 1.")
+    print("                λᴿ⁽ᵏ⁾ = (X⁽ᵏ⁾)ᵀBX⁽ᵏ⁾ / (X⁽ᵏ⁾)ᵀX⁽ᵏ⁾.")
+    print("  B6. Kiểm tra phần dư r⁽ᵏ⁾ = BX⁽ᵏ⁾ − λᴿ⁽ᵏ⁾X⁽ᵏ⁾.")
+    print("  B7. Cuối cùng đặt v = X⁽ᵏ⁾/‖X⁽ᵏ⁾‖₂ để ‖v‖₂ = 1.")
 
 
 def print_iteration_details(record: Iteration, decimals: int) -> None:
     print(f"\nVòng lặp {record.index}:")
-    print_vector(record.y, f"Y^({record.index}) = B X^({record.index - 1})", decimals, horizontal=True)
+    yk = iteration("Y", record.index)
+    xk = iteration("X", record.index)
+    x_previous = iteration("X", record.index - 1)
+    alpha = indexed("α", record.index)
+    rayleigh = f"λᴿ{iteration('', record.index)}"
+    print_vector(record.y, f"{yk} = B{x_previous}", decimals, horizontal=True)
     print(
-        f"  α_{record.index} = phần tử của Y^({record.index}) có môđun lớn nhất"
+        f"  {alpha} = phần tử của {yk} có môđun lớn nhất"
         f" = {format_number(record.alpha, decimals)}"
     )
-    print_vector(record.x, f"X^({record.index}) = Y^({record.index})/α_{record.index}", decimals, horizontal=True)
-    print(f"  λ_R^({record.index}) (thương Rayleigh) = {format_number(record.rayleigh, decimals)}")
-    print(f"  ||X^({record.index}) - (+/-)X^({record.index - 1})||₂ = {format_scientific(record.delta)}")
-    print(f"  ||B X^({record.index}) - λ_R^({record.index})X^({record.index})||₂ = {format_scientific(record.residual)}")
+    print_vector(record.x, f"{xk} = {yk}/{alpha}", decimals, horizontal=True)
+    print(f"  {rayleigh} (thương Rayleigh) = {format_number(record.rayleigh, decimals)}")
+    print(f"  ‖{xk} − (±){x_previous}‖₂ = {format_scientific(record.delta)}")
+    print(f"  ‖B{xk} − {rayleigh}{xk}‖₂ = {format_scientific(record.residual)}")
 
 
 def print_iteration_table(records: list[Iteration], decimals: int) -> None:
     print("\nBảng tổng hợp các lần lặp:")
     component_count = len(records[0].x)
-    headers = ["k", "α_k", "λ_R^(k)", "||r||₂"] + [f"x{i + 1}^(k)" for i in range(component_count)]
+    headers = ["k", "αₖ", "λᴿ⁽ᵏ⁾", "‖r‖₂"] + [iteration("x", "k", i + 1) for i in range(component_count)]
     rows: list[list[str]] = []
     for record in records:
         rows.append([
@@ -483,10 +580,11 @@ def print_power_result(result: PowerResult, stage: int, decimals: int) -> None:
 
     print("\nKết quả của giai đoạn:")
     print(f"  Dừng vì {result.stop_reason}.")
-    print(f"  Trị riêng trội gần đúng: λ_{stage} = {format_number(result.eigenvalue, decimals)}")
-    print_vector(result.eigenvector, f"v_{stage}", decimals)
-    print(f"  ||v_{stage}||₂ = {norm2(result.eigenvector):.{decimals}f}")
-    print(f"  Sai số phần dư tuyệt đối ||Bv_{stage} - λ_{stage}v_{stage}||₂ = {format_scientific(result.residual)}")
+    eigenvalue_name, vector_name = indexed("λ", stage), indexed("v", stage)
+    print(f"  Trị riêng trội gần đúng: {eigenvalue_name} = {format_number(result.eigenvalue, decimals)}")
+    print_vector(result.eigenvector, vector_name, decimals)
+    print(f"  {norm(vector_name, 2)} = {norm2(result.eigenvector):.{decimals}f}")
+    print(f"  Sai số phần dư tuyệt đối ‖B{vector_name} − {eigenvalue_name}{vector_name}‖₂ = {format_scientific(result.residual)}")
     print(f"  Sai số phần dư tương đối = {format_scientific(result.relative_residual)}")
     if result.converged:
         print("  Đánh giá: kết quả đạt sai số ε đã nhập.")
@@ -504,6 +602,9 @@ class DeflationResult:
     method: str
     pivot: int | None
     annihilation_error: float
+    right_vector: Vector | None = None
+    left_vector: Vector | None = None
+    left_right_dot: float | None = None
 
 
 def gaussian_solve_vector(matrix: Matrix, rhs: Vector) -> Vector:
@@ -653,7 +754,7 @@ def eigenpairs_with_deflation(
     return EigenpairCollection(values, vectors, relatives, True, "Mọi cặp đã đạt phần dư trên A gốc.")
 
 
-def deflate(a: Matrix, eigenvalue: float, eigenvector: Vector) -> DeflationResult:
+def _legacy_wielandt_deflate(a: Matrix, eigenvalue: float, eigenvector: Vector) -> DeflationResult:
     n = len(a)
     if is_symmetric(a):
         # Hotelling/Wielandt cho ma trận đối xứng và ||v||_2 = 1.
@@ -666,7 +767,7 @@ def deflate(a: Matrix, eigenvalue: float, eigenvector: Vector) -> DeflationResul
             for j in range(i):
                 average = 0.5 * (result[i][j] + result[j][i])
                 result[i][j] = result[j][i] = average
-        method = "Hotelling cho ma trận đối xứng: B_mới = B - λvv^T"
+        method = "Hotelling cho ma trận đối xứng: Bₘớᵢ = B − λvvᵀ"
         pivot = None
     else:
         # Wielandt: chọn |v_s| lớn nhất, u = v/v_s, B_mới = B - u(e_s^T B).
@@ -679,7 +780,7 @@ def deflate(a: Matrix, eigenvalue: float, eigenvector: Vector) -> DeflationResul
             [a[i][j] - u[i] * pivot_row[j] for j in range(n)]
             for i in range(n)
         ]
-        method = "Wielandt tổng quát: B_mới = B - (v/v_s)(e_s^T B)"
+        method = "Wielandt tổng quát: Bₘớᵢ = B − (v/vₛ)(eₛᵀB)"
 
     tiny = 100.0 * sys.float_info.epsilon * matrix_frobenius_norm(a)
     result = [[0.0 if abs(value) <= tiny else value for value in row] for row in result]
@@ -696,21 +797,22 @@ def print_deflation(
     decimals: int,
 ) -> None:
     print_section(f"C. XUỐNG THANG LẦN {stage}")
-    print(f"Cặp trị riêng - vector riêng dùng để xuống thang: (λ_{stage}, v_{stage}).")
-    print(f"  λ_{stage} = {format_number(eigenvalue, decimals)}")
-    print_vector(eigenvector, f"v_{stage}", decimals, horizontal=True)
-    print(f"  ||v_{stage}||₂ = {norm2(eigenvector):.{decimals}f}")
+    eigenvalue_name, vector_name = indexed("λ", stage), indexed("v", stage)
+    print(f"Cặp trị riêng - vector riêng dùng để xuống thang: ({eigenvalue_name}, {vector_name}).")
+    print(f"  {eigenvalue_name} = {format_number(eigenvalue, decimals)}")
+    print_vector(eigenvector, vector_name, decimals, horizontal=True)
+    print(f"  {norm(vector_name, 2)} = {norm2(eigenvector):.{decimals}f}")
     print(f"\nCông thức áp dụng: {after.method}.")
     if after.pivot is not None:
-        print(f"  Chọn s = {after.pivot + 1} vì |(v_{stage})_s| lớn nhất.")
+        print(f"  Chọn s = {after.pivot + 1} vì |({vector_name})ₛ| lớn nhất.")
     else:
         print("  B đối xứng và v đã có chuẩn 2 bằng 1, nên dùng trực tiếp λvv^T.")
     print("\nMa trận trước khi xuống thang:")
-    print_matrix(before, f"B_{stage - 1}", decimals)
+    print_matrix(before, indexed("B", stage - 1), decimals)
     print("\nMa trận sau khi xuống thang:")
-    print_matrix(after.matrix, f"B_{stage}", decimals)
+    print_matrix(after.matrix, indexed("B", stage), decimals)
     print(
-        f"\nKiểm tra trị riêng vừa khử: ||B_{stage}v_{stage}||₂"
+        f"\nKiểm tra trị riêng vừa khử: ‖{indexed('B', stage)}{vector_name}‖₂"
         f" = {format_scientific(after.annihilation_error)} (theo lý thuyết phải xấp xỉ 0)."
     )
     if after.annihilation_error > 10.0 ** (-decimals):
@@ -734,16 +836,16 @@ def print_problem_data(
     print_section("DỮ KIỆN BÀI TOÁN")
     print(f"Cấp ma trận: n = {len(a)}.")
     print_matrix(a, "A", decimals)
-    print_vector(x0, "X^(0)", decimals, horizontal=True)
+    print_vector(x0, "X⁽⁰⁾", decimals, horizontal=True)
     if fixed_iterations > 0:
         print(f"Chế độ lặp: thực hiện đúng k = {fixed_iterations} vòng ở mỗi giai đoạn.")
     else:
-        print(f"Chế độ lặp: đến khi ||BX - λX||₂ <= ε = {epsilon:.3e}.")
-        print(f"Số vòng lặp tối đa mỗi giai đoạn: k_max = {maximum_iterations}.")
+        print(f"Chế độ lặp: đến khi ‖BX − λX‖₂ ≤ ε = {epsilon:.3e}.")
+        print(f"Số vòng lặp tối đa mỗi giai đoạn: kₘₐₓ = {maximum_iterations}.")
     print(f"Số trị riêng cần tìm: {wanted}.")
     print(f"Kết quả được trình bày với {decimals} chữ số sau dấu phẩy.")
     if is_symmetric(a):
-        print("Nhận xét: A là ma trận đối xứng ⇒ các trị riêng thực và dùng được B - λvv^T.")
+        print("Nhận xét: A là ma trận đối xứng ⇒ các trị riêng thực và dùng được B − λvvᵀ.")
     else:
         print("Nhận xét: A không đối xứng ⇒ chương trình dùng công thức xuống thang Wielandt tổng quát.")
 
@@ -758,25 +860,141 @@ def print_final_summary(
 ) -> None:
     print_section("D. KẾT QUẢ CUỐI CÙNG")
     for i, (value, vector, residual) in enumerate(zip(values, vectors, residuals_on_original), start=1):
-        print(f"\n{i}. λ_{i} ≈ {format_number(value, decimals)}")
-        print_vector(vector, f"   v_{i}", decimals, horizontal=True)
-        print(f"   ||Av_{i} - λ_{i}v_{i}||₂ = {format_scientific(residual)}")
+        eigenvalue_name, vector_name = indexed("λ", i), indexed("v", i)
+        print(f"\n{i}. {eigenvalue_name} ≈ {format_number(value, decimals)}")
+        print_vector(vector, f"   {vector_name}", decimals, horizontal=True)
+        print(f"   ‖A{vector_name} − {eigenvalue_name}{vector_name}‖₂ = {format_scientific(residual)}")
     if not values:
         print("Không tìm được cặp trị riêng - vector riêng nào.")
     print("\nMa trận cuối quá trình:")
-    print_matrix(final_matrix, f"B_{len(values)}", decimals)
+    print_matrix(final_matrix, indexed("B", len(values)), decimals)
     if is_symmetric(original) and len(vectors) > 1:
         print("\nKiểm tra tính trực giao của các vector riêng (ma trận đối xứng):")
         for i in range(len(vectors)):
             for j in range(i + 1, len(vectors)):
-                print(f"  |v_{i + 1}^T v_{j + 1}| = {abs(dot(vectors[i], vectors[j])):.7e}")
+                vi, vj = indexed("v", i + 1), indexed("v", j + 1)
+                print(f"  |{transpose(vi)}{vj}| = {abs(dot(vectors[i], vectors[j])):.7e}")
     print("\nKẾT LUẬN ĐỂ CHÉP VÀO BÀI:")
     if values:
-        print(f"  Trị riêng trội đầu tiên của A là λ_1 ≈ {format_number(values[0], decimals)}.")
-        print(f"  Vector riêng tương ứng đã được chuẩn hóa để ||v_1||₂ = 1.")
+        print(f"  Trị riêng trội đầu tiên của A là λ₁ ≈ {format_number(values[0], decimals)}.")
+        print("  Vector riêng tương ứng đã được chuẩn hóa để ‖v₁‖₂ = 1.")
         if len(values) > 1:
             print(f"  Đã tìm được {len(values)} trị riêng bằng lũy thừa kết hợp xuống thang.")
     print("  Các số liệu trên được tính từ giá trị chưa làm tròn; chỉ phần hiển thị được làm tròn.")
+
+
+def left_eigenvector_for(
+    a: Matrix,
+    eigenvalue: float,
+    right_vector: Vector,
+    *,
+    epsilon: float = 1e-10,
+    max_iter: int = 5000,
+) -> Vector:
+    """Tim vector rieng trai w cua A, tuc A^T w = lambda w."""
+    transposed = transpose_matrix(a)
+    candidates = [right_vector[:], [1.0] * len(a)]
+    candidates.extend([[1.0 if i == j else 0.0 for i in range(len(a))] for j in range(len(a))])
+    best: tuple[float, Vector] | None = None
+    for candidate in candidates:
+        try:
+            _value, vector, _residual, relative = recover_eigenvector_on_original(
+                transposed, eigenvalue, candidate, epsilon=epsilon, max_iter=max_iter
+            )
+        except ArithmeticError:
+            continue
+        if best is None or relative < best[0]:
+            best = (relative, vector)
+        if relative <= epsilon:
+            return vector
+    if best is None:
+        raise ArithmeticError(
+            "Khong thuc hien xuong thang cho ma tran khong doi xung vi chua co vector rieng trai du tin cay."
+        )
+    return best[1]
+
+
+def deflate(a: Matrix, eigenvalue: float, eigenvector: Vector) -> DeflationResult:
+    """Xuong thang dung cong thuc doi xung hoac vector rieng trai/phai."""
+    n = len(a)
+    if is_symmetric(a):
+        result = [
+            [a[i][j] - eigenvalue * eigenvector[i] * eigenvector[j] for j in range(n)]
+            for i in range(n)
+        ]
+        for i in range(n):
+            for j in range(i):
+                average = 0.5 * (result[i][j] + result[j][i])
+                result[i][j] = result[j][i] = average
+        method = "Hotelling cho ma tran doi xung: B = A - lambda*v*v^T"
+        left_vector = eigenvector[:]
+        left_right_dot = dot(left_vector, eigenvector)
+    else:
+        left_vector = left_eigenvector_for(a, eigenvalue, eigenvector)
+        left_right_dot = dot(left_vector, eigenvector)
+        if abs(left_right_dot) <= 100.0 * sys.float_info.epsilon:
+            raise ArithmeticError(
+                "Khong thuc hien xuong thang cho ma tran khong doi xung vi w^T v = 0 hoac qua nho."
+            )
+        result = [
+            [a[i][j] - eigenvalue * eigenvector[i] * left_vector[j] / left_right_dot for j in range(n)]
+            for i in range(n)
+        ]
+        method = "Xuong thang khong doi xung: B = A - lambda*v*w^T/(w^T*v)"
+
+    tiny = 100.0 * sys.float_info.epsilon * matrix_frobenius_norm(a)
+    result = [[0.0 if abs(value) <= tiny else value for value in row] for row in result]
+    error = norm2(mat_vec(result, eigenvector))
+    return DeflationResult(result, method, None, error, eigenvector[:], left_vector, left_right_dot)
+
+
+def render_power_exam_report(result: PowerResult, *, stage: int = 1, decimals: int = 6) -> str:
+    """Ban chep thi ngan gon, khong lo ten bien ky thuat Python."""
+    eigenvalue_name = f"λ{stage}".translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))
+    vector_name = f"v{stage}".translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉"))
+    lines = [
+        "Đề bài: tìm trị riêng trội và vector riêng tương ứng bằng phương pháp lũy thừa.",
+        "Công thức: y⁽ᵏ⁺¹⁾ = Ax⁽ᵏ⁾, x⁽ᵏ⁺¹⁾ = y⁽ᵏ⁺¹⁾/‖y⁽ᵏ⁺¹⁾‖,",
+        "λ⁽ᵏ⁺¹⁾ = (x⁽ᵏ⁺¹⁾)ᵀAx⁽ᵏ⁺¹⁾ / (x⁽ᵏ⁺¹⁾)ᵀx⁽ᵏ⁺¹⁾.",
+        "Điều kiện áp dụng: có trị riêng trội duy nhất theo môđun và vector đầu có thành phần theo hướng riêng trội.",
+        "k | x⁽ᵏ⁾ | λ⁽ᵏ⁾ | ‖x⁽ᵏ⁾-x⁽ᵏ⁻¹⁾‖ | ‖Ax⁽ᵏ⁾-λ⁽ᵏ⁾x⁽ᵏ⁾‖",
+    ]
+    records = result.iterations
+    if len(records) > 6:
+        shown = records[:3] + records[-3:]
+        gap_after = records[2].index
+    else:
+        shown = records
+        gap_after = -1
+    for record in shown:
+        if record.index == gap_after + 1 and len(records) > 6:
+            lines.append("...")
+        vector = "[" + ", ".join(format_number(value, decimals) for value in record.x) + "]ᵀ"
+        lines.append(
+            f"{record.index} | {vector} | {format_number(record.rayleigh, decimals)} | "
+            f"{record.delta:.3e} | {record.residual:.3e}"
+        )
+    vector = "[" + ", ".join(format_number(value, decimals) for value in result.eigenvector) + "]ᵀ"
+    lines.extend(
+        [
+            f"Kết quả: {eigenvalue_name} ≈ {format_number(result.eigenvalue, decimals)}, {vector_name} ≈ {vector}.",
+            f"‖A{vector_name} − {eigenvalue_name}{vector_name}‖₂ = {result.residual:.6e}.",
+            f"Residual tương đối = {result.relative_residual:.6e}.",
+        ]
+    )
+    if result.converged:
+        lines.append(
+            f"Kết luận: Sau {len(result.iterations)} bước lặp, ta thu được trị riêng trội {eigenvalue_name} "
+            f"và vector riêng tương ứng {vector_name}. Vì ‖A{vector_name} − {eigenvalue_name}{vector_name}‖₂ rất nhỏ nên kết quả được chấp nhận."
+        )
+    else:
+        lines.append(
+            "Kết luận: Phương pháp lũy thừa cơ bản chưa đủ điều kiện tách trị riêng trội duy nhất theo môđun. "
+            "Kết quả trên chỉ nên xem là quan sát tính toán."
+        )
+    if result.warning:
+        lines.append("Cảnh báo: " + result.warning)
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -796,7 +1014,7 @@ def main() -> None:
     epsilon = input_float("Nhập sai số ε dùng để kiểm tra [Enter = 1e-7]: ", 1e-7)
     maximum_iterations = 1000
     if fixed_iterations == 0:
-        maximum_iterations = input_int("Nhập k_max [Enter = 1000]: ", 1, 1000)
+        maximum_iterations = input_int("Nhập kₘₐₓ [Enter = 1000]: ", 1, 1000)
 
     wanted = input_int(f"Số trị riêng muốn tìm, từ 1 đến {n} [Enter = 1]: ", 1, 1)
     while wanted > n:

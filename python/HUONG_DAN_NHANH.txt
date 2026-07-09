@@ -1,0 +1,68 @@
+HƯỚNG DẪN NHANH – PROJECT GIẢI TÍCH SỐ (CHẠY OFFLINE)
+=====================================================
+
+1. TRƯỚC KHI ĐI THI
+   - Nhấp đúp KIEM_TRA_MAY.bat.
+   - Chỉ dùng máy khi dòng cuối là: HỆ THỐNG SẴN SÀNG CHẠY OFFLINE.
+   - Muốn chạy toàn bộ test, nhấp đúp CHAY_TEST.bat
+     (CHAY_KIEM_THU.bat được giữ làm tên tương thích cũ).
+
+2. CÁCH CHẠY MỘT BÀI
+   Mở PowerShell/CMD tại thư mục project python rồi gõ:
+       python ten_file.py
+   Ví dụ:
+       python chiadoi_pt.py
+       python seideltuyentinh.py
+       python khai_trien_ky_di_svd.py
+
+3. CÁCH NHẬP SỐ VÀ BIỂU THỨC
+   Mọi chương trình nhận các dạng:
+       1/3       sqrt(2)       √2       cbrt(5)       ∛5
+       pi        e             sin(pi/6)              2^(-3)
+   Trong một hàng ma trận, các phần tử cách nhau bằng khoảng trắng;
+   không đặt khoảng trắng bên trong một phần tử, ví dụ: sqrt(2)+1.
+
+4. CHỌN FILE THEO DẠNG BÀI
+   - Chia đôi: chiadoi_pt.py
+   - Dây cung: daycung.py
+   - Newton một biến: tieptuyen.py
+   - Lặp đơn một biến: lapdon_pt.py
+   - Hệ phi tuyến: hptlapdonphituyen.py hoặc newton_he_phi_tuyen.py
+   - Gauss/xét hạng: gauss (2).py hoặc gaussrank.py
+   - LU/PLU: phantach_lu.py
+   - Cholesky: cholesky.py
+   - Jacobi/Seidel/Richardson: lapjacobituyentinh.py, seideltuyentinh.py,
+     lapdon_tuyentinh.py
+   - Nghịch đảo: nghichdao_newton.py hoặc nghichdao_vienquanh.py
+   - Trị riêng: danilevski_tri_rieng.py hoặc tri_rieng_troi_xuong_thang.py
+   - SVD: khai_trien_ky_di_svd.py
+   - Đa thức: phuong_phap_da_thuc.py
+   - Sai số: saiso (1).py
+
+5. THƯ VIỆN CẦN CÓ
+   Python 3.10 trở lên; numpy, sympy, mpmath. Pytest chỉ cần khi chạy test.
+   Danh sách nằm trong requirements.txt; phải cài sẵn trước khi vào phòng thi.
+
+6. LỖI THƯỜNG GẶP
+   - "python không được nhận diện": cài/chọn đúng Python trong PATH.
+   - Thiếu module: chuẩn bị môi trường trước; phòng thi không cần và không nên có mạng.
+   - Sai số phải dương; kích thước phải là số nguyên; mỗi hàng ma trận phải đủ phần tử.
+   - Không nhập phép chia cho 0, căn bậc hai số âm hoặc tên hàm lạ.
+
+Project không gọi API, không tải file và không cần Internet khi chạy.
+
+7. HAI DẠNG SEIDEL KHÔNG ĐƯỢC NHẦM
+   Trong seideltuyentinh.py:
+   - Mục 1: Ax=b, dùng công thức Seidel cho hệ phương trình.
+   - Mục 2: x=Bx+d, dùng trực tiếp
+       x_i^(k+1)=d_i+sum_(j<i)b_ij*x_j^(k+1)+sum_(j>=i)b_ij*x_j^(k).
+     Tổng thứ hai có cả b_ii*x_i^(k); chương trình không đổi sang (I-B)x=d.
+   - Mục 3: tìm A^(-1) bằng giải AX=I.
+   - Mục 4: giải nhiều vế phải AX=B.
+
+8. DẠNG SVD
+   Trong khai_trien_ky_di_svd.py:
+   - Mục 1 (mặc định): SVD rút gọn U_r(m×r), Sigma_r(r×r), V_r^T(r×n).
+   - Mục 2: SVD đầy đủ.
+   - Mục 3: dạng mỏng min(m,n), kể cả giá trị kỳ dị gần 0 theo tolerance.
+   Chương trình in B_0=A^T A và từng B_i sau xuống thang Hotelling thực sự.

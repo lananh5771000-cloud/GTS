@@ -2,9 +2,11 @@ import sympy as sp
 import numpy as np
 import math
 import sys
+from exam_format import exam_print as print
 from truyen_sai_so import propagate_bound, symbolic_derivative_bound
 from dataclasses import dataclass
 from typing import Callable
+from input_utils import parse_math_expression, parse_real
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -33,6 +35,7 @@ def bisection(
     max_iter: int = 1000,
     continuity_verified: bool = False,
     continuity_samples: int = 257,
+    fixed_iterations: int | None = None,
 ) -> BisectionResult:
     """Lõi chia đôi kiểm thử được; không tự nhận việc lấy mẫu là chứng minh liên tục."""
     if not all(math.isfinite(v) for v in (a, b, epsilon, function_tolerance)):
@@ -42,17 +45,37 @@ def bisection(
     if epsilon <= 0 or function_tolerance < 0 or max_iter <= 0:
         raise ValueError("epsilon, tolerance và max_iter phải hợp lệ.")
 
+    if fixed_iterations is not None and fixed_iterations < 0:
+        raise ValueError("fixed_iterations phai khong am.")
+
     def value(x: float) -> float:
-        y = float(f(x))
+        try:
+            raw = f(x)
+            if isinstance(raw, complex) and raw.imag != 0:
+                raise ValueError
+            y = float(raw)
+        except (ArithmeticError, OverflowError, TypeError, ValueError) as exc:
+            raise ArithmeticError(
+                "Không thể áp dụng phương pháp chia đôi vì hàm không xác định "
+                "hoặc chưa bảo đảm liên tục trên đoạn đã cho."
+            ) from exc
         if not math.isfinite(y):
-            raise ArithmeticError(f"f({x}) không hữu hạn; không được kết luận có nghiệm.")
+            raise ArithmeticError(
+                "Không thể áp dụng phương pháp chia đôi vì hàm không xác định "
+                "hoặc chưa bảo đảm liên tục trên đoạn đã cho."
+            )
         return y
 
+    fixed_mode = fixed_iterations is not None
     fa, fb = value(a), value(b)
-    if abs(fa) <= function_tolerance:
-        return BisectionResult(a, True, continuity_verified, "Nghiệm ở đầu mút a.", [], (a, a), 0.0, abs(fa), 0)
-    if abs(fb) <= function_tolerance:
-        return BisectionResult(b, True, continuity_verified, "Nghiệm ở đầu mút b.", [], (b, b), 0.0, abs(fb), 0)
+    if (fa == 0.0 if fixed_mode else abs(fa) <= function_tolerance):
+        exact = fa == 0.0
+        reason = "Đầu mút a là nghiệm chính xác." if exact else "Đầu mút a đạt ngưỡng phần dư; chưa chứng nhận là nghiệm chính xác."
+        return BisectionResult(a, True, exact, reason, [], (a, a) if exact else (a, b), 0.0 if exact else b - a, abs(fa), 0)
+    if (fb == 0.0 if fixed_mode else abs(fb) <= function_tolerance):
+        exact = fb == 0.0
+        reason = "Đầu mút b là nghiệm chính xác." if exact else "Đầu mút b đạt ngưỡng phần dư; chưa chứng nhận là nghiệm chính xác."
+        return BisectionResult(b, True, exact, reason, [], (b, b) if exact else (a, b), 0.0 if exact else b - a, abs(fb), 0)
     if fa * fb > 0:
         raise ValueError("f(a) và f(b) không trái dấu.")
 
@@ -65,6 +88,25 @@ def bisection(
     records: list[tuple[int, float, float, float, float, float]] = []
     root = (a + b) / 2.0
     residual = abs(value(root))
+    if fixed_iterations is not None:
+        for k in range(1, fixed_iterations + 1):
+            root = (a + b) / 2.0
+            fm = value(root)
+            error = (b - a) / 2.0
+            records.append((k, a, b, root, fm, error))
+            residual = abs(fm)
+            if fm == 0.0:
+                return BisectionResult(root, True, True, "Trung diem la nghiem chinh xac.", records, (root, root), 0.0, residual, fixed_iterations)
+            if fa * fm < 0:
+                b, fb = root, fm
+            else:
+                a, fa = root, fm
+        error = (b - a) / 2.0
+        reason = (
+            f"Da thuc hien dung k={fixed_iterations} buoc chia doi; "
+            "chua dung tieu chuan epsilon de chung nhan."
+        )
+        return BisectionResult(root, True, continuity_verified and error <= epsilon, reason, records, (a, b), error, residual, fixed_iterations)
     for k in range(max_iter + 1):
         root = (a + b) / 2.0
         fm = value(root)
@@ -72,7 +114,9 @@ def bisection(
         records.append((k, a, b, root, fm, error))
         residual = abs(fm)
         if residual <= function_tolerance:
-            return BisectionResult(root, True, continuity_verified, "Trung điểm là nghiệm theo tolerance.", records, (root, root), 0.0, residual, required)
+            exact = fm == 0.0
+            reason = "Trung điểm là nghiệm chính xác." if exact else "Trung điểm đạt ngưỡng phần dư; chưa chứng nhận là nghiệm chính xác."
+            return BisectionResult(root, True, exact, reason, records, (root, root) if exact else (a, b), 0.0 if exact else error, residual, required)
         if error <= epsilon:
             reason = "Đạt chặn sai số của khoảng chia đôi."
             if not continuity_verified:
@@ -134,7 +178,7 @@ def bisection_method(max_iter=10000):
     print("=== GIẢI PHƯƠNG TRÌNH & ĐÁNH GIÁ SAI SỐ ===\n")
     print("Input: f(x), khoảng phân ly [a,b], điều kiện dừng.")
     print("Output: bảng chia đôi, nghiệm gần đúng và chặn sai số.")
-    print("Công thức: x_n=(a_n+b_n)/2; giữ nửa khoảng còn đổi dấu.\n")
+    print("Công thức: xₙ = (aₙ + bₙ)/2; giữ nửa khoảng còn đổi dấu.\n")
     x, pi_sym, e_sym = sp.symbols("x pi e")
 
     # 1. Nhập phương trình gốc
@@ -157,7 +201,7 @@ def bisection_method(max_iter=10000):
     if use_G == "y":
         G_name = input("Nhập ký hiệu của hàm đó (vd: V, S, F...): ").strip() or "G"
         g_input = input(f"Nhập biểu thức {G_name}(x) (vd: 1/6 * pi * x**3): ")
-        G_expr_raw = sp.sympify(g_input, locals={"pi": pi_sym, "e": e_sym})
+        G_expr_raw = parse_math_expression(g_input, {"x": x, "pi": pi_sym, "e": e_sym})
 
     # 3. Xử lý hằng số Pi, E
     combined_input = f_input + " " + g_input
@@ -179,7 +223,7 @@ def bisection_method(max_iter=10000):
         delta_e = 0.5 * 10 ** (-k_e)
 
     # 4. Thay số và thiết lập hàm f(x)
-    f_expr = sp.sympify(f_input, locals={"pi": pi_val, "e": e_val})
+    f_expr = parse_math_expression(f_input, {"x": x, "pi": sp.Float(pi_val), "e": sp.Float(e_val)})
     f = sp.lambdify(x, f_expr, "numpy")
 
     # 5. Xây dựng công thức truyền sai số tự động cho G(x)
@@ -239,8 +283,8 @@ def bisection_method(max_iter=10000):
     except (TypeError, ValueError):
         precision = 8
 
-    a_orig = float(input("\nNhập đầu mút a: "))
-    b_orig = float(input("Nhập đầu mút b: "))
+    a_orig = parse_real(input("\nNhập đầu mút a: "))
+    b_orig = parse_real(input("Nhập đầu mút b: "))
     a, b = a_orig, b_orig
 
     if max_iter <= 0 or not (math.isfinite(a) and math.isfinite(b)) or not a < b:
@@ -268,19 +312,27 @@ def bisection_method(max_iter=10000):
             f"2. Chặn tương đối (B_G/(|{G_name}(x_n)|-B_G) \u2264 \u03b5)"
         )
         stop_choice = input("Lựa chọn (1/2): ")
-        target_epsilon = float(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
+        target_epsilon = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
         cond_type = "G_abs" if stop_choice == "1" else "G_rel"
     else:
         print("\nCHỌN ĐIỀU KIỆN DỪNG THEO x:")
-        print("1. Sai số tuyệt đối (\u0394x \u2264 \u03b5)")
-        print("2. Chặn tương đối (\u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 \u03b5)")
-        print("3. Theo số chữ số đáng tin của x (tuyệt đối)")
-        stop_choice = input("Lựa chọn (1/2/3): ")
+        print("1. Thực hiện đúng k bước chia đôi")
+        print("2. Sai số tuyệt đối (\u0394x \u2264 \u03b5)")
+        print("3. Chặn tương đối (\u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 \u03b5)")
+        print("4. Theo số chữ số đáng tin của x (tuyệt đối)")
+        stop_choice = input("Lựa chọn (1/2/3/4): ")
         if stop_choice == "1":
-            target_epsilon = float(input("Nhập sai số tuyệt đối epsilon = "))
-            cond_type = "x_abs"
+            fixed_steps = int(input("Nhap so buoc k: "))
+            if fixed_steps < 0:
+                print("[X] k phai khong am.")
+                return
+            target_epsilon = 1.0
+            cond_type = "fixed"
         elif stop_choice == "2":
-            target_epsilon = float(input("Nhập sai số tương đối epsilon = "))
+            target_epsilon = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
+            cond_type = "x_abs"
+        elif stop_choice == "3":
+            target_epsilon = parse_real(input("Nhập sai số tương đối epsilon = "))
             cond_type = "x_rel"
         else:
             k = int(input("Nhập số chữ số đáng tin: "))
@@ -306,7 +358,7 @@ def bisection_method(max_iter=10000):
     if not math.isfinite(target_epsilon) or target_epsilon <= 0:
         print("[X] Lỗi: epsilon phải dương và hữu hạn.")
         return
-    print("Chặn sai số trung điểm: |x_n-x*| <= (b-a)/2^(n+1).")
+    print("Chặn sai số trung điểm: |xₙ − x*| ≤ (b − a)/2ⁿ⁺¹.")
     if cond_type == "x_abs":
         required_steps = max(
             0, math.ceil(math.log2((b - a) / (2 * target_epsilon)))
@@ -400,6 +452,11 @@ def bisection_method(max_iter=10000):
             final_xn = xn
             break
 
+        if cond_type == "fixed" and n + 1 >= fixed_steps:
+            final_xn = xn
+            n += 1
+            break
+
         n += 1
 
     print("-" * len(header))
@@ -429,4 +486,9 @@ def bisection_method(max_iter=10000):
 
 
 if __name__ == "__main__":
-    bisection_method()
+    try:
+        bisection_method()
+    except (EOFError, KeyboardInterrupt):
+        print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")

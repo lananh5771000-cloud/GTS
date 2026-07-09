@@ -9,8 +9,11 @@ numpy.linalg.inv/solve/eig/svd.
 """
 
 import math
+from exam_format import exam_print as print
 import sys
 from fractions import Fraction
+import sympy as sp
+from input_utils import MathInputError, parse_exact, parse_real, split_number_row
 
 
 reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
@@ -61,7 +64,7 @@ def input_positive_number(prompt, default=None):
         if token == "" and default is not None:
             return default
         try:
-            value = float(Fraction(token))
+            value = parse_real(token)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError
             return value
@@ -74,15 +77,10 @@ def input_positive_number(prompt, default=None):
 
 def input_matrix_row(prompt, expected_count):
     while True:
-        tokens = input(prompt).split()
-        if len(tokens) != expected_count:
-            print(
-                f"Lỗi: Dòng phải có đúng {expected_count} phần tử. Vui lòng nhập lại."
-            )
-            continue
         try:
-            return [Fraction(token) for token in tokens]
-        except (ValueError, ZeroDivisionError):
+            tokens = split_number_row(input(prompt), expected_count)
+            return [parse_exact(token) for token in tokens]
+        except (MathInputError, ValueError, ZeroDivisionError):
             print(
                 "Lỗi: Chỉ nhập số nguyên, số thập phân hoặc phân số hợp lệ "
                 "(ví dụ 2, -3, 0.25, 1/3)."
@@ -118,11 +116,13 @@ def choose_initial_approximation():
 
 
 def exact_number(value):
-    return (
-        str(value.numerator)
-        if value.denominator == 1
-        else f"{value.numerator}/{value.denominator}"
-    )
+    if isinstance(value, Fraction):
+        return (
+            str(value.numerator)
+            if value.denominator == 1
+            else f"{value.numerator}/{value.denominator}"
+        )
+    return sp.sstr(sp.simplify(value))
 
 
 def exact_matrix_lines(matrix):
@@ -727,7 +727,13 @@ def newton_inverse(
         else:
             print("\nNgay tại k=0, chặn sai số kể cả làm tròn đã không vượt quá epsilon.")
 
-    loop_limit = predicted if stop_mode == "apriori" else maximum_iterations
+    if stop_mode == "apriori":
+        if predicted is None:
+            print("Khong tinh duoc so buoc tien nghiem tu du lieu hien tai.")
+            return None
+        loop_limit = predicted
+    else:
+        loop_limit = maximum_iterations
     for iteration in range(1, loop_limit + 1):
         if converged:
             break
@@ -1060,3 +1066,5 @@ if __name__ == "__main__":
         main()
     except (EOFError, KeyboardInterrupt):
         print("\nĐã kết thúc chương trình.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")
