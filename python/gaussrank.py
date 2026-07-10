@@ -75,6 +75,7 @@ def forward_elimination(A, B, digits):
     rows, variables = A.shape
     pivot_row = 0
     pivot_columns = []
+    idx = [0] * rows
     step = 1
 
     print("\n========== QUÁ TRÌNH KHỬ THUẬN ==========")
@@ -83,7 +84,7 @@ def forward_elimination(A, B, digits):
         if not candidates:
             print(f"\nCột {column + 1} không có phần tử trụ, chuyển sang cột kế tiếp.")
             continue
-        chosen = max(candidates, key=lambda r: abs(float(aug[r, column])))
+        chosen = candidates[0]
         if chosen != pivot_row:
             aug.row_swap(chosen, pivot_row)
             print(f"\nBước {step}: R{pivot_row + 1} ↔ R{chosen + 1}")
@@ -91,6 +92,7 @@ def forward_elimination(A, B, digits):
             step += 1
 
         pivot_columns.append(column)
+        idx[pivot_row] = column + 1
         print(f"\nChọn phần tử trụ a[{pivot_row + 1},{column + 1}] = {fmt(aug[pivot_row, column], digits)}.")
         for r in range(pivot_row + 1, rows):
             if aug[r, column] == 0:
@@ -105,7 +107,8 @@ def forward_elimination(A, B, digits):
             break
     if step == 1:
         print("Không cần thực hiện phép biến đổi hàng nào.")
-    return aug, pivot_columns
+    print(f"\nidx (vị trí pivot theo hàng, 1-based) = {idx}")
+    return aug, pivot_columns, idx
 
 
 def back_substitute(echelon, pivot_columns, variables, rhs_columns, digits, show=True):
@@ -147,12 +150,13 @@ def solve_from_matrices(A, B, digits, inverse_mode=False):
     original_A, original_B = A.copy(), B.copy()
     variables, rhs_columns = A.cols, B.cols
     print_matrix(A.row_join(B), digits, "\nMa trận bổ sung ban đầu [A | B]:")
-    echelon, pivots = forward_elimination(A, B, digits)
+    echelon, pivots, idx = forward_elimination(A, B, digits)
     print_matrix(echelon, digits, "\n========== MA TRẬN BẬC THANG ==========")
 
     rank_A = rank_exact(original_A)
     rank_aug = rank_exact(original_A.row_join(original_B))
     print(f"\nrank(A) = {rank_A}; rank([A | B]) = {rank_aug}; số ẩn = {variables}.")
+    print(f"idx = {idx}")
     if rank_A < rank_aug:
         print("\nKẾT LUẬN: " + ("A không khả nghịch." if inverse_mode else "Hệ phương trình vô nghiệm."))
         return None

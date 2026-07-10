@@ -316,18 +316,15 @@ def bisection_method(max_iter=10000):
         cond_type = "G_abs" if stop_choice == "1" else "G_rel"
     else:
         print("\nCHỌN ĐIỀU KIỆN DỪNG THEO x:")
-        print("1. Thực hiện đúng k bước chia đôi")
+        print("1. Theo PDF")
         print("2. Sai số tuyệt đối (\u0394x \u2264 \u03b5)")
         print("3. Chặn tương đối (\u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 \u03b5)")
-        print("4. Theo số chữ số đáng tin của x (tuyệt đối)")
-        stop_choice = input("Lựa chọn (1/2/3/4): ")
+        print("4. Đúng k bước chia đôi")
+        print("5. Theo số chữ số đáng tin của x (tuyệt đối)")
+        stop_choice = input("Lựa chọn (1/2/3/4/5): ")
         if stop_choice == "1":
-            fixed_steps = int(input("Nhap so buoc k: "))
-            if fixed_steps < 0:
-                print("[X] k phai khong am.")
-                return
-            target_epsilon = 1.0
-            cond_type = "fixed"
+            target_epsilon = parse_real(input("Nhập epsilon theo PDF = "))
+            cond_type = "pdf"
         elif stop_choice == "2":
             target_epsilon = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
@@ -335,10 +332,18 @@ def bisection_method(max_iter=10000):
             target_epsilon = parse_real(input("Nhập sai số tương đối epsilon = "))
             cond_type = "x_rel"
         else:
-            k = int(input("Nhập số chữ số đáng tin: "))
-            target_epsilon = 0.5 * (10 ** (-k))
-            print(f"-> Epsilon tuyệt đối tương đương: {target_epsilon}")
-            cond_type = "x_abs"
+            if stop_choice == "4":
+                fixed_steps = int(input("Nhập số bước k: "))
+                if fixed_steps < 0:
+                    print("[X] k phải không âm.")
+                    return
+                target_epsilon = 1.0
+                cond_type = "fixed"
+            else:
+                k = int(input("Nhập số chữ số đáng tin: "))
+                target_epsilon = 0.5 * (10 ** (-k))
+                print(f"-> Epsilon tuyệt đối tương đương: {target_epsilon}")
+                cond_type = "x_abs"
 
     # --- QUÁ TRÌNH LẶP ---
     print("\n--- BẢNG QUÁ TRÌNH LẶP ---")
@@ -359,11 +364,14 @@ def bisection_method(max_iter=10000):
         print("[X] Lỗi: epsilon phải dương và hữu hạn.")
         return
     print("Chặn sai số trung điểm: |xₙ − x*| ≤ (b − a)/2ⁿ⁺¹.")
-    if cond_type == "x_abs":
+    if cond_type == "pdf":
+        required_steps = max(0, math.ceil(math.log2((b - a) / target_epsilon))) if (b - a) > target_epsilon else 0
+        print(f"Số bước theo PDF: n >= {required_steps}.")
+    elif cond_type == "x_abs":
         required_steps = max(
             0, math.ceil(math.log2((b - a) / (2 * target_epsilon)))
         ) if (b - a) > 2 * target_epsilon else 0
-        print(f"Số bước tối thiểu theo ngưỡng của x: n >= {required_steps}.")
+        print(f"Số bước tối thiểu theo chặn trung điểm chặt hơn: n >= {required_steps}.")
     elif cond_type == "x_rel":
         print("Dừng tương đối: chưa thể suy số bước chỉ từ epsilon nếu chưa có chặn dưới dương cho |x*|.")
     else:
@@ -434,7 +442,10 @@ def bisection_method(max_iter=10000):
                 f"{n:<3} | {a:<12.{precision}f} | {b:<12.{precision}f} | {xn:<12.{precision}f} | {dau_f:^9} | {delta_x:<16.{precision}e} | {delta_x_rel:<16.{precision}e}"
             )
 
-            if cond_type == "x_abs" and delta_x < target_epsilon:
+            if cond_type == "pdf" and n >= required_steps:
+                final_xn = xn
+                break
+            elif cond_type == "x_abs" and delta_x < target_epsilon:
                 final_xn = xn
                 break
             elif cond_type == "x_rel" and delta_x_rel < target_epsilon:

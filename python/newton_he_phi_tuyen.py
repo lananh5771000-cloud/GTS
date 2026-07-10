@@ -225,6 +225,7 @@ def newton_system(
     maximum_iterations: int,
     fixed_iterations: int = 0,
     maximum_step_norm: float | None = None,
+    method: str = "classic",
 ) -> Result:
     if len(expressions) == 0 or len(expressions) != len(variables):
         raise ValueError("Số phương trình phải bằng số ẩn và khác 0.")
@@ -234,10 +235,26 @@ def newton_system(
         not math.isfinite(maximum_step_norm) or maximum_step_norm <= 0
     ):
         raise ValueError("maximum_step_norm phải dương và hữu hạn.")
+    method = method.strip().lower()
+    if method not in {"classic", "modified"}:
+        raise ValueError("method chi nhan 'classic' hoac 'modified'.")
     jacobian = sp.Matrix(expressions).jacobian(variables)
     x = np.asarray(initial, dtype=float).copy()
     if x.shape != (len(variables),) or not np.all(np.isfinite(x)):
         raise ValueError("Vector đầu sai kích thước hoặc chứa NaN/vô cùng.")
+    fixed_jacobian = None
+    if method == "modified":
+        try:
+            fixed_jacobian = evaluate_jacobian(jacobian, variables, x)
+        except ArithmeticError as error:
+            return Result(
+                x,
+                [],
+                False,
+                f"Modified Newton that bai vi J0 khong hop le: {error}",
+                "singular_jacobian",
+                math.inf,
+            )
     records: list[Record] = []
     limit = fixed_iterations if fixed_iterations > 0 else maximum_iterations
     converged = False
@@ -260,14 +277,15 @@ def newton_system(
             )
             return Result(x, records, True, reason, "converged", residual_old)
         try:
-            J_old = evaluate_jacobian(jacobian, variables, x)
+            J_old = fixed_jacobian.copy() if fixed_jacobian is not None else evaluate_jacobian(jacobian, variables, x)
             delta = gaussian_solve(J_old, -F_old)
         except ArithmeticError as error:
+            label = "J0" if fixed_jacobian is not None else "Jacobian"
             return Result(
                 x,
                 records,
                 False,
-                f"Newton thất bại do Jacobian suy biến tại điểm chưa phải nghiệm: {error}",
+                f"Newton thất bại do {label} suy biến tại điểm chưa phải nghiệm: {error}",
                 "singular_jacobian",
                 residual_old,
             )
@@ -308,8 +326,38 @@ def newton_system(
     return Result(x, records, converged, reason, status, residual_norm)
 
 
-def print_theory() -> None:
+def modified_newton_system(
+    expressions: list[sp.Expr],
+    variables: list[sp.Symbol],
+    initial: np.ndarray,
+    epsilon: float,
+    maximum_iterations: int,
+    fixed_iterations: int = 0,
+    maximum_step_norm: float | None = None,
+) -> Result:
+    return newton_system(
+        expressions,
+        variables,
+        initial,
+        epsilon,
+        maximum_iterations,
+        fixed_iterations,
+        maximum_step_norm,
+        method="modified",
+    )
+
+
+def print_theory(method: str = "classic") -> None:
     section("A. THUẬT TOÁN NEWTON CHO HỆ PHƯƠNG TRÌNH PHI TUYẾN")
+    method = method.strip().lower()
+    if method == "modified":
+        print("Nhánh dùng trong bài: Modified Newton.")
+        print("Tính J0 = J(X0) một lần; nếu det(J0)=0 thì dừng.")
+        print("Lặp X_(k+1)=X_k - J0^(-1)F(X_k).")
+    else:
+        print("Nhánh dùng trong bài: Newton cổ điển.")
+        print("Mỗi vòng tính J(X_k); nếu det(J(X_k))=0 thì dừng.")
+        print("Lặp X_(k+1)=X_k - J(X_k)^(-1)F(X_k).")
     print("Input:")
     print("  • Hệ F(x)=0 gồm n phương trình và điểm đầu x^(0).")
     print("  • Sai số epsilon hoặc số vòng lặp k.")
@@ -394,6 +442,11 @@ def main() -> None:
                 print(f"  Lỗi biểu thức: {error}.")
 
     initial = read_vector(f"\nNhập x^(0) gồm {n} số: ", n)
+    print("\nChọn nhánh Newton theo PDF:")
+    print("1. Newton cổ điển")
+    print("2. Modified Newton")
+    method_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+    method = "modified" if method_choice == "2" else "classic"
     print("\nChế độ dừng:")
     print("1. Theo epsilon")
     print("2. Thực hiện đúng k bước")
@@ -403,12 +456,10 @@ def main() -> None:
     maximum_iterations = 100
     if stop_choice == "2":
         fixed_iterations = read_int("Số bước k: ", 1)
-    else:
-        maximum_iterations = read_int("k_max [Enter = 100]: ", 1, 100)
     decimals = read_int("Số chữ số sau dấu phẩy [Enter = 7]: ", 0, 7)
 
     jacobian = sp.Matrix(expressions).jacobian(variables)
-    print_theory()
+    print_theory(method)
     section("B. DỮ KIỆN VÀ JACOBIAN")
     print("Hệ đã nhập:")
     for i, expression in enumerate(expressions, start=1):
@@ -425,6 +476,7 @@ def main() -> None:
             epsilon,
             maximum_iterations,
             fixed_iterations,
+            method=method,
         )
     except ArithmeticError as error:
         print(f"\nDừng: {error}")

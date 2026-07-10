@@ -1175,77 +1175,207 @@ def print_svd_result(
     else:
         raise ValueError("presentation_mode phải là exam, full hoặc debug.")
 
+
+def condition_number_pdf(
+    matrix: np.ndarray,
+    *,
+    epsilon: float = 1e-10,
+    max_iter: int = 10000,
+) -> float:
+    """Tính cond(A)=sqrt(lambda_max/lambda_min) từ SVD tự cài đặt; suy biến thì vô cùng."""
+    A = np.asarray(matrix, dtype=float)
+    result = svd_power(A, epsilon=epsilon, max_iter=max_iter, full_matrices=False)
+    if result.rank < min(A.shape) or result.rank == 0:
+        return math.inf
+    positive = result.singular_values[result.singular_values > result.rank_tolerance]
+    if positive.size < min(A.shape) or positive[-1] <= 0.0:
+        return math.inf
+    return float(positive[0] / positive[-1])
+
+
+def svd_low_rank_approximation(
+    matrix: np.ndarray,
+    delta: float,
+    *,
+    epsilon: float = 1e-10,
+    max_iter: int = 10000,
+) -> tuple[np.ndarray, int, float, SVDResult]:
+    """
+    Xap xi A bang SVD theo PDF.
+
+    Chon so hang giu lai nho nhat k sao cho
+    sqrt(sum_{i=k+1..r} sigma_i^2)/||A||_F <= delta.
+    """
+    if not math.isfinite(delta) or delta < 0.0:
+        raise ValueError("delta phai khong am va huu han.")
+    A = np.asarray(matrix, dtype=float)
+    result = svd_power(A, epsilon=epsilon, max_iter=max_iter, full_matrices=False)
+    values = np.asarray(result.singular_values[: result.rank], dtype=float)
+    norm_f = float(np.linalg.norm(values, 2))
+    if norm_f == 0.0:
+        return np.zeros_like(A), 0, 0.0, result
+    kept = len(values)
+    relative_tail = 0.0
+    for candidate in range(0, len(values) + 1):
+        tail = float(np.linalg.norm(values[candidate:], 2))
+        ratio = tail / norm_f
+        if ratio <= delta:
+            kept = candidate
+            relative_tail = ratio
+            break
+    if kept == 0:
+        approximation = np.zeros_like(A)
+    else:
+        approximation = (
+            result.U[:, :kept]
+            @ np.diag(values[:kept])
+            @ result.Vt[:kept, :]
+        )
+    return approximation, kept, relative_tail, result
+
+
+def _dominant_eigenvalue_by_power(matrix: np.ndarray, epsilon: float, max_iter: int) -> float:
+    """Tìm trị riêng trội bằng lũy thừa trên ma trận đối xứng."""
+    size = matrix.shape[0]
+    initial = np.ones(size, dtype=float)
+    result = power_method_symmetric(matrix, initial, [], epsilon, max_iter, 0)
+    return float(result.eigenvalue)
+
+
+def _print_condition_number_pdf(matrix: np.ndarray, decimals: int, *, epsilon: float, max_iter: int) -> None:
+    """In cond(A) theo công thức PDF bằng lũy thừa trên T và T^{-1}."""
+    section("B. TÍNH SỐ ĐIỀU KIỆN cond(A)")
+    print("Theo PDF:")
+    print("  Nếu rank(A) < min(m,n) hoặc A = O thì cond(A) = ∞.")
+    if matrix.shape[0] >= matrix.shape[1]:
+        print("  Vì m ≥ n, đặt T = AᵀA.")
+        T = matrix.T @ matrix
+    else:
+        print("  Vì m < n, đặt T = AAᵀ.")
+        T = matrix @ matrix.T
+    print("  Tìm λmax bằng lũy thừa trên T.")
+    print("  Tìm λ′max bằng lũy thừa trên T⁻¹.")
+    print("  Đặt λmin = 1/λ′max và cond(A) = sqrt(λmax/λmin).")
+    print_matrix("A", matrix, decimals)
+
+    if np.linalg.matrix_rank(matrix) < min(matrix.shape) or np.allclose(matrix, 0.0):
+        print("\nKết luận: rank(A) < min(m,n) hoặc A = O, nên cond(A) = ∞.")
+        return
+
+    lambda_max = _dominant_eigenvalue_by_power(T, epsilon, max_iter)
+    if lambda_max <= 0.0:
+        print("\nKết luận: không xác định được λmax > 0, nên cond(A) = ∞.")
+        return
+    try:
+        lambda_prime_max = _dominant_eigenvalue_by_power(np.linalg.inv(T), epsilon, max_iter)
+    except np.linalg.LinAlgError:
+        print("\nKết luận: T không khả nghịch, nên cond(A) = ∞.")
+        return
+    if lambda_prime_max <= 0.0:
+        print("\nKết luận: không xác định được λ′max > 0, nên cond(A) = ∞.")
+        return
+
+    lambda_min = 1.0 / lambda_prime_max
+    cond_value = math.sqrt(lambda_max / lambda_min)
+    print(f"\nλmax = {lambda_max:.{decimals}e}")
+    print(f"λ′max = {lambda_prime_max:.{decimals}e}")
+    print(f"λmin = 1/λ′max = {lambda_min:.{decimals}e}")
+    print(f"cond(A) = sqrt(λmax/λmin) = {cond_value:.{decimals}e}")
+
+
+def _print_low_rank_approximation_pdf(
+    matrix: np.ndarray,
+    approximation: np.ndarray,
+    kept: int,
+    relative_tail: float,
+    result: SVDResult,
+    decimals: int,
+) -> None:
+    """In xấp xỉ thấp hạng đúng công thức B = Σ σ_i u_i v_i^T."""
+    section("B. XẤP XỈ MA TRẬN BẰNG SVD")
+    print("Theo PDF:")
+    print("  Tính SVD rút gọn A = UΣVᵀ.")
+    print("  Tính ||A||_F = sqrt(Σσ_i²).")
+    print("  Chọn k nhỏ nhất sao cho phần đuôi thỏa sqrt(Σ_{i=k+1}^r σ_i²)/||A||_F ≤ δ.")
+    print("  In ma trận xấp xỉ B = Σ_{i=1}^k σ_i u_i v_iᵀ.")
+    print_matrix("A", matrix, decimals)
+
+    values = np.asarray(result.singular_values[: result.rank], dtype=float)
+    fro_norm = float(np.linalg.norm(values, 2))
+    print(f"\n||A||_F = sqrt(Σσ_i²) = {fro_norm:.{decimals}e}")
+    print(f"k nhỏ nhất thỏa điều kiện = {kept}")
+    print(f"Phần đuôi tương đối = {relative_tail:.{decimals}e}")
+
+    if kept > 0:
+        U_k = result.U[:, :kept]
+        Vt_k = result.Vt[:kept, :]
+        Sigma_k = np.diag(values[:kept])
+        print_matrix("U_k", U_k, decimals)
+        print_matrix("Σ_k", Sigma_k, decimals)
+        print_matrix("V_kᵀ", Vt_k, decimals)
+    else:
+        print("Không giữ lại hạng nào; ma trận xấp xỉ là ma trận 0.")
+
+    print_matrix("B", approximation, decimals)
+    if kept == 0:
+        print("\nB = Σ_{i=1}^0 σ_i u_i v_iᵀ = 0")
+    else:
+        print(f"\nB = Σ_{{i=1}}^{kept} σ_i u_i v_iᵀ")
+
+
 def main() -> None:
     print(LINE)
-    print("TÌM GIÁ TRỊ KỲ DỊ BẰNG PHƯƠNG PHÁP LŨY THỪA VÀ XUỐNG THANG")
+    print("SVD THEO MENU BÀI THI")
     print(LINE)
     print("Có thể nhập số nguyên, thập phân hoặc phân số a/b; Enter dùng giá trị mặc định.")
 
     m = input_integer("\nNhập số dòng m của A: ", 1)
     n = input_integer("Nhập số cột n của A: ", 1)
     A = input_matrix(m, n)
-    initial = input_start_vector(n)
-
-    print("\nDạng phân tích cần in:")
-    print("  1. SVD rút gọn theo hạng r (mặc định trong bài thi)")
-    print("  2. SVD đầy đủ")
-    print("  3. SVD mỏng gồm min(m,n) bộ ba, kể cả σ gần 0")
-    while True:
-        form_choice = input("Chọn [Enter = 1]: ").strip() or "1"
-        if form_choice in {"1", "2", "3"}:
-            break
-        print("  Lỗi: chỉ chọn 1, 2 hoặc 3.")
-    form = {"1": "reduced", "2": "full", "3": "economy"}[form_choice]
-
-
-    print("\nChế độ dừng phương pháp lũy thừa:")
-    print("  1. Lặp đến khi đạt sai số ε")
-    print("  2. Thực hiện đúng k vòng như đề yêu cầu")
-    while True:
-        choice = input("Chọn [Enter = 1]: ").strip() or "1"
-        if choice in {"1", "2"}:
-            break
-        print("  Lỗi: chỉ chọn 1 hoặc 2.")
-    epsilon = input_positive("Nhập ε dùng để kiểm tra [Enter = 1e-10]: ", 1e-10)
-    fixed_steps = 0
-    maximum_iterations = 10000
-    if choice == "1":
-        maximum_iterations = input_integer("Nhập k_max [Enter = 10000]: ", 1, 10000)
-    else:
-        fixed_steps = input_integer("Nhập số vòng lặp k: ", 1)
-
     decimals = input_integer("Số chữ số sau dấu phẩy [Enter = 7]: ", 0, 7)
 
-    print("\nChọn kiểu trình bày:")
-    print("  1. Bản chép thi (gọn, không in thông số kỹ thuật)")
-    print("  2. Bản đầy đủ (có thêm ngưỡng kiểm tra, vẫn dễ chép)")
-    print("  3. Bản kỹ thuật/debug")
-    try:
-        presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
-    except (EOFError, StopIteration):
-        presentation_choice = "1"
-    while presentation_choice not in {"1", "2", "3"}:
+    print("\nMENU CHÍNH")
+    print("1. Tìm khai triển SVD")
+    print("2. Tính số điều kiện cond(A)")
+    print("3. Xấp xỉ ma trận bằng SVD")
+    while True:
+        choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        if choice in {"1", "2", "3"}:
+            break
         print("  Lỗi: chỉ chọn 1, 2 hoặc 3.")
-        try:
-            presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
-        except (EOFError, StopIteration):
-            presentation_choice = "1"
-    presentation_mode = {"1": "exam", "2": "full", "3": "debug"}[presentation_choice]
 
-    print_theory(m, n)
-    section("C. ÁP DỤNG CHO MA TRẬN ĐÃ NHẬP")
-    print_matrix("A", A, decimals)
-    print("\nTrước khi lập A^T A, chương trình đổi thang A_scaled=A/alpha để tránh tràn/ngầm 0.")
-    result = svd_power(
-        A,
-        initial=initial,
-        epsilon=epsilon,
-        max_iter=maximum_iterations,
-        fixed_steps=fixed_steps,
-        full_matrices=form in {"full", "economy"},
-    )
-    print_deflation_history(A, result, decimals)
-    print_svd_result(A, result, decimals, form=form, presentation_mode=presentation_mode)
+    if choice == "1":
+        print_theory(m, n)
+        print("\nChọn chế độ tính SVD:")
+        print("  1. Bài thi gọn")
+        print("  2. Bài giải đầy đủ")
+        print("  3. Kỹ thuật/debug")
+        presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        while presentation_choice not in {"1", "2", "3"}:
+            print("  Lỗi: chỉ chọn 1, 2 hoặc 3.")
+            presentation_choice = input("Chọn [Enter = 1]: ").strip() or "1"
+        presentation_mode = {"1": "exam", "2": "full", "3": "debug"}[presentation_choice]
+        initial = input_start_vector(n)
+        epsilon = input_positive("Nhập ε dùng để kiểm tra [Enter = 1e-10]: ", 1e-10)
+        max_iter = input_integer("Nhập k_max [Enter = 10000]: ", 1, 10000)
+        result = svd_power(A, initial=initial, epsilon=epsilon, max_iter=max_iter, full_matrices=False)
+        print_deflation_history(A, result, decimals)
+        print_svd_result(A, result, decimals, form="reduced", presentation_mode=presentation_mode)
+    elif choice == "2":
+        epsilon = input_positive("Nhập ε dùng để kiểm tra [Enter = 1e-10]: ", 1e-10)
+        max_iter = input_integer("Nhập k_max [Enter = 10000]: ", 1, 10000)
+        _print_condition_number_pdf(A, decimals, epsilon=epsilon, max_iter=max_iter)
+    else:
+        delta = input_positive("Nhập δ cho xấp xỉ thấp hạng: ", 1e-3)
+        epsilon = input_positive("Nhập ε dùng để kiểm tra [Enter = 1e-10]: ", 1e-10)
+        max_iter = input_integer("Nhập k_max [Enter = 10000]: ", 1, 10000)
+        approximation, kept, relative_tail, result = svd_low_rank_approximation(
+            A,
+            delta,
+            epsilon=epsilon,
+            max_iter=max_iter,
+        )
+        _print_low_rank_approximation_pdf(A, approximation, kept, relative_tail, result, decimals)
 
 
 if __name__ == "__main__":

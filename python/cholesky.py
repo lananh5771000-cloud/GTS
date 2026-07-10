@@ -183,6 +183,12 @@ def multiply_matrices(A, B):
     ]
 
 
+def normal_equation_system(A, B):
+    """Lap A_bar=A^T*A va B_bar=A^T*B theo dung luong PDF."""
+    T = transpose_matrix(A)
+    return multiply_matrices(T, A), multiply_matrices(T, B)
+
+
 def matrices_equal(A, B):
     return (
         len(A) == len(B)
@@ -422,6 +428,17 @@ def solve_u_x(U, Y, show_steps=True):
     return X
 
 
+def cholesky_solve_pdf(A, B, decimals=7, show_steps=False):
+    """Giai AX=B theo PDF: A_bar=A^T*A, B_bar=A^T*B, A_bar=U^T*U."""
+    A_bar, B_bar = normal_equation_system(A, B)
+    U, error = cholesky_decomposition(A_bar, decimals, show_steps=show_steps)
+    if error is not None:
+        raise ArithmeticError("A^T*A khong phan tach Cholesky duoc.")
+    Y = solve_transpose_u_y(U, B_bar, show_steps=show_steps)
+    X = solve_u_x(U, Y, show_steps=show_steps)
+    return X, U, A_bar, B_bar, Y
+
+
 # ============================================================
 # KẾT QUẢ VÀ KIỂM TRA
 # ============================================================
@@ -477,6 +494,24 @@ def process(A, B, decimals, inverse_mode=False):
     print("\nDữ liệu ban đầu:")
     print_matrix(A_original, decimals, prefix="A = ")
     print_matrix(B_original, decimals, prefix="I = " if inverse_mode else "B = ")
+
+    if not inverse_mode:
+        print("\nTheo PDF, đặt T = A^T rồi lập:")
+        A_bar, B_bar = normal_equation_system(A_original, B_original)
+        print_matrix(A_bar, decimals, prefix="A_bar = A^T*A = ")
+        print_matrix(B_bar, decimals, prefix="B_bar = A^T*B = ")
+        U, error = cholesky_decomposition(A_bar, decimals, show_steps=True)
+        if error is not None:
+            print("\nKẾT LUẬN: A_bar không đối xứng xác định dương nên không giải được bằng Cholesky PDF.")
+            return None
+        print_cholesky_result(A_bar, U, decimals)
+        print("\nGiải U^T*Y = B_bar rồi U*X = Y.")
+        Y = solve_transpose_u_y(U, B_bar, show_steps=True)
+        print_matrix(Y, decimals, prefix="Y = ")
+        X = solve_u_x(U, Y, show_steps=True)
+        print("\nKẾT LUẬN: nghiệm theo hệ chuẩn trong PDF là:")
+        print_matrix(X, decimals, prefix="X = ")
+        return X
 
     U, error = cholesky_decomposition(A_original, decimals, show_steps=True)
 

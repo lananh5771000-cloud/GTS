@@ -8,7 +8,8 @@ Mục tiêu của chương trình:
       T = diag(1/a_11, ..., 1/a_nn)
       α = I - T.A,  β = T.B
       q = ||α||_∞ (chéo trội hàng)
-      q = ||α||_1, λ = max|a_ii|/min|a_ii| (chéo trội cột)
+      α~ = I - A.T, q = ||α~||_1,
+      λ = max_i|a_ii|/min_i|a_ii| (chéo trội cột)
       X^(k) = α.X^(k-1) + β
 - Hỗ trợ một hoặc nhiều vế phải và tìm nghịch đảo bằng cách giải AX = I.
 """
@@ -386,6 +387,7 @@ def prepare_jacobi_system(
     T = np.diag(1.0 / np.diag(A_work))
     alpha = np.eye(n) - T @ A_work
     beta = T @ B_work
+    alpha_tilde = None
 
     if kind == "row":
         q = float(np.max(np.sum(np.abs(alpha), axis=1)))
@@ -393,14 +395,14 @@ def prepare_jacobi_system(
         p = "inf"
         certificate_matrix = alpha
     else:
-        # Theo đúng công thức trong đáp án mẫu: vẫn dùng ma trận lặp
-        # α = -D^(-1)(L+U), lấy q = ||α||_1 và thêm hệ số
-        # λ = max|a_ii|/min|a_ii| trong đánh giá sai số.
-        q = float(np.max(np.sum(np.abs(alpha), axis=0)))
+        # Nhánh cột vẫn lặp bằng α = I - T.A. Ma trận α~ = I - A.T
+        # chỉ dùng để chứng nhận hội tụ và tính q trong chuẩn 1.
+        alpha_tilde = np.eye(n) - A_work @ T
+        q = float(np.max(np.sum(np.abs(alpha_tilde), axis=0)))
         diagonal_abs = np.abs(np.diag(A_work))
         lam = float(np.max(diagonal_abs) / np.min(diagonal_abs))
         p = "one"
-        certificate_matrix = alpha
+        certificate_matrix = alpha_tilde
 
     # Do sai số dấu phẩy động, q có thể thành 1 - 1e-16 hoặc 1 + 1e-16.
     if not (q < 1.0):
@@ -412,7 +414,12 @@ def prepare_jacobi_system(
             "B": B_work,
             "permutation": permutation,
             "kind": kind,
+            "alpha": alpha,
+            "alpha_tilde": alpha_tilde,
+            "certificate_matrix": certificate_matrix,
             "q": q,
+            "lambda": lam,
+            "p": p,
         }
 
     return {
@@ -427,6 +434,7 @@ def prepare_jacobi_system(
         "kind": kind,
         "T": T,
         "alpha": alpha,
+        "alpha_tilde": alpha_tilde,
         "beta": beta,
         "certificate_matrix": certificate_matrix,
         "q": q,
@@ -1066,6 +1074,7 @@ def print_solution(
     T = np.asarray(result["T"], dtype=float)
     alpha = np.asarray(result["alpha"], dtype=float)
     beta = np.asarray(result["beta"], dtype=float)
+    certificate_matrix = np.asarray(result["certificate_matrix"], dtype=float)
     permutation = tuple(result["permutation"])
     kind = str(result["kind"])
     p_symbol = _norm_symbol(str(result["p"]))
@@ -1102,17 +1111,19 @@ def print_solution(
 
     print("\n3. KIỂM TRA HỘI TỤ")
     if kind == "row":
-        row_sums = np.sum(np.abs(alpha), axis=1)
+        row_sums = np.sum(np.abs(certificate_matrix), axis=1)
         print("Vì A chéo trội hàng nên chọn p = ∞, λ = 1.")
         print("q = ‖α‖_∞ = max_i Σ_j|α_ij|.")
         print("Các tổng hàng của |α|: " + ", ".join(_sig(x) for x in row_sums) + ".")
     else:
-        column_sums = np.sum(np.abs(alpha), axis=0)
+        alpha_tilde = np.asarray(result["alpha_tilde"], dtype=float)
+        column_sums = np.sum(np.abs(alpha_tilde), axis=0)
         print("Vì A chéo trội cột nên chọn p = 1.")
-        print("Với M_J = α = -D^(-1)(L+U), ta có")
-        print("q = ‖M_J‖_1 = max_j Σ_i|(M_J)_ij|.")
+        print("Đặt α~ = I - A.T = -(L+U)D^(-1) chỉ để kiểm tra hội tụ.")
+        print_matrix("α~ = I - A.T", alpha_tilde, decimals)
+        print("q = ‖α~‖_1 = max_j Σ_i|α~_ij|.")
         print(
-            "Các tổng cột của |M_J|: " + ", ".join(_sig(x) for x in column_sums) + "."
+            "Các tổng cột của |α~|: " + ", ".join(_sig(x) for x in column_sums) + "."
         )
         print("λ = max_i|a_ii| / min_i|a_ii|.")
 

@@ -181,11 +181,11 @@ def print_custom_algorithm(
     print(f"   - Trích xuất được điểm xuất phát x0 = {x0}")
 
     if cond_type == "x_abs":
-        print("5. Điều kiện dừng: Sai số tuyệt đối của x (Hậu nghiệm):")
-        print(f"   \u0394x = (M2 / 2m1) * |x_n - x_{{n-1}}|^2 \u2264 {target_val}")
-    elif cond_type == "x_rel":
-        print("5. Điều kiện dừng: Sai số tương đối của x:")
-        print(f"   \u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 {target_val}, cần |x_n|>\u0394x")
+        print("5. Điều kiện dừng: Sai số mục tiêu của x:")
+        print(f"   \u0394x = |f(x_n)| / m1 \u2264 {target_val}")
+    elif cond_type == "x_two":
+        print("5. Điều kiện dừng: Sai số hai lần liên tiếp:")
+        print(f"   \u0394x = (M2/(2m1))|x_n - x_(n-1)|^2 \u2264 {target_val}")
     elif cond_type == "G_abs":
         print(
             f"5. Điều kiện dừng: Sai số tuyệt đối của hàm {G_name}: \u0394{G_name} \u2264 {target_val}"
@@ -408,18 +408,16 @@ def newton_method(max_iter=1000):
             target_val = int(input("Nhập số lần lặp tối đa: "))
             cond_type = "iter"
     else:
-        print(
-            "1. Sai số tuyệt đối của x (\u0394x = (M2/2m1)*|x_n - x_{n-1}|^2 \u2264 \u03b5)"
-        )
-        print("2. Chặn tương đối của x (\u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 \u03b5)")
-        print("3. Dừng theo số lần lặp cố định")
+        print("1. Sai số mục tiêu \u0394 = |f(x_n)|/m1")
+        print("2. Sai số hai lần liên tiếp \u0394 = (M2/2m1)|x_n-x_{n-1}|^2")
+        print("3. Đúng k bước")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
             target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
         elif choice == "2":
-            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
-            cond_type = "x_rel"
+            target_val = parse_real(input("Nhập sai số mục tiêu epsilon = "))
+            cond_type = "x_two"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
             cond_type = "iter"
@@ -430,7 +428,8 @@ def newton_method(max_iter=1000):
     if use_G == "y":
         header = f"{'n':<3} | {'x_n':<15} | {'f(x_n)':<15} | {'E_x':<15} | {G_name:<15} | {'B_G/XP_G':<15} | {'B_G tương đối':<15}"
     else:
-        header = f"{'n':<3} | {'x_n':<15} | {'f(x_n)':<15} | {'\u0394x (Tuyệt đối)':<18} | {'\u03b4x (Tương đối)':<18}"
+        delta_label = "Δx = |f(x_n)|/m1" if cond_type == "x_abs" else "Δx = (M2/2m1)|x_n-x_{n-1}|^2"
+        header = f"{'n':<3} | {'x_n':<15} | {'f(x_n)':<15} | {delta_label:<24} | {'\u03b4x (Tương đối)':<18}"
 
     print("-" * len(header))
     print(header)
@@ -457,7 +456,10 @@ def newton_method(max_iter=1000):
             delta_x = float("inf")
             delta_x_rel = float("inf")
         else:
-            delta_x = error_coeff * (abs(xn - x_prev) ** 2)
+            if cond_type == "x_abs":
+                delta_x = abs(fxn) / m1
+            else:
+                delta_x = error_coeff * (abs(xn - x_prev) ** 2)
             delta_x_rel = (
                 delta_x / (abs(xn) - delta_x)
                 if abs(xn) > delta_x
@@ -519,7 +521,7 @@ def newton_method(max_iter=1000):
                     break
                 elif cond_type == "x_abs" and delta_x <= target_val:
                     break
-                elif cond_type == "x_rel" and delta_x_rel <= target_val:
+                elif cond_type == "x_two" and delta_x <= target_val:
                     break
 
         # Nếu đạt số bước (khi chọn dừng theo số bước nhưng n=0)
@@ -575,5 +577,7 @@ if __name__ == "__main__":
         newton_method()
     except (EOFError, KeyboardInterrupt):
         print("\nĐã dừng chương trình; không có dữ liệu đầu vào đầy đủ.")
+    except Exception as error:
+        print(f"\nKhông thể thực hiện: {error}")
     except Exception as error:
         print(f"\nKhông thể thực hiện: {error}")

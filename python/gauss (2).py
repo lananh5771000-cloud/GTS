@@ -122,39 +122,78 @@ def multiply_matrices(left, right):
 
 
 def gauss_jordan(A, B, decimals):
-    """Đưa phần A của [A|B] về dạng bậc thang rút gọn."""
+    """Đưa phần S=[A|B] về dạng bậc thang rút gọn theo kiểu PDF."""
     m, n, k = len(A), len(A[0]), len(B[0])
     aug = [A[i][:] + B[i][:] for i in range(m)]
     pivot_pos = {}
+    pivot_values = [None] * m
+    row = [0] * m
+    col = [0] * n
+    idx = [0] * m
     pivot_row = 0
     step = 1
 
-    for column in range(n):
-        candidates = [r for r in range(pivot_row, m) if aug[r][column] != 0]
-        if not candidates:
-            continue
-        chosen = choose_pivot_row(aug, candidates, column)
-        print(f"\nBước {step}: Chọn pivot ở cột {column + 1}.")
-        if chosen != pivot_row:
-            aug[pivot_row], aug[chosen] = aug[chosen], aug[pivot_row]
-            print(f"R{pivot_row + 1} <-> R{chosen + 1}")
+    while pivot_row < m:
+        chosen = None
+        max_abs = 0
+        max_pos = None
 
-        pivot_value = aug[pivot_row][column]
-        print(f"R{pivot_row + 1} <- R{pivot_row + 1} / ({pivot_value})")
-        aug[pivot_row] = [value / pivot_value for value in aug[pivot_row]]
+        for column in range(n):
+            if col[column] == 1:
+                continue
+            for i in range(m):
+                if row[i] == 1:
+                    continue
+                value = aug[i][column]
+                if value == 0:
+                    continue
+                if abs(value) == 1:
+                    chosen = (i, column)
+                    break
+                if abs(value) > max_abs:
+                    max_abs = abs(value)
+                    max_pos = (i, column)
+            if chosen is not None:
+                break
+
+        if chosen is None:
+            chosen = max_pos
+        if chosen is None:
+            break
+
+        i0, j0 = chosen
+        print(f"\nBước {step}: Chọn pivot s[{i0 + 1},{j0 + 1}] theo quy tắc PDF.")
+        if i0 != pivot_row:
+            aug[pivot_row], aug[i0] = aug[i0], aug[pivot_row]
+            row[pivot_row], row[i0] = row[i0], row[pivot_row]
+            print(f"R{pivot_row + 1} <-> R{i0 + 1}")
+            i0 = pivot_row
+
+        row[pivot_row] = 1
+        row[i0] = 1
+        col[j0] = 1
+        idx[pivot_row] = j0 + 1
+        pivot_value = aug[pivot_row][j0]
+        pivot_values[pivot_row] = pivot_value
 
         for r in range(m):
-            if r != pivot_row and aug[r][column] != 0:
-                factor = aug[r][column]
-                print(f"R{r + 1} <- R{r + 1} - ({factor})*R{pivot_row + 1}")
-                aug[r] = [aug[r][j] - factor * aug[pivot_row][j] for j in range(n + k)]
+            if r == pivot_row or aug[r][j0] == 0:
+                continue
+            factor = aug[r][j0]
+            print(f"R{r + 1} <- R{r + 1} - ({factor})*R{pivot_row + 1}")
+            aug[r] = [aug[r][j] - factor * aug[pivot_row][j] for j in range(n + k)]
 
-        pivot_pos[column] = pivot_row
-        print_matrix(aug, m, n, k, decimals, prefix=f"A_bar^({step}) = ")
+        pivot_pos[j0] = pivot_row
+        print_matrix(aug, m, n, k, decimals, prefix=f"S^({step}) = ")
         pivot_row += 1
         step += 1
-        if pivot_row == m:
-            break
+
+    for i in range(m):
+        if idx[i] > 0 and pivot_values[i] not in {None, 0} and pivot_values[i] != 1:
+            print(f"Chuẩn hóa hàng mốc R{i + 1} / ({pivot_values[i]}) sau khi khử xong.")
+            aug[i] = [value / pivot_values[i] for value in aug[i]]
+
+    print(f"idx = {idx}")
     return aug, pivot_pos, step - 1
 
 
@@ -221,9 +260,9 @@ def process(A, B, decimals, inverse_mode=False):
     initial_aug = [A[i][:] + B[i][:] for i in range(m)]
 
     print("\n" + "=" * 80)
-    print("Ta sử dụng phương pháp lặp Gauss - Jordan giải hệ phương trình AX = B:")
-    print("Khởi tạo ma trận mở rộng A_bar = [A|B]\n")
-    print_matrix(initial_aug, m, n, k, decimals, prefix="A_bar = ")
+    print("Ta sử dụng phương pháp Gauss - Jordan giải hệ phương trình AX = B:")
+    print("Khởi tạo ma trận mở rộng S = [A|B]\n")
+    print_matrix(initial_aug, m, n, k, decimals, prefix="S = ")
 
     aug, pivot_pos, last_step = gauss_jordan(A, B, decimals)
     rank_A = matrix_rank(A_original)
@@ -231,7 +270,7 @@ def process(A, B, decimals, inverse_mode=False):
 
     print("\n" + "=" * 80)
     print("Kết quả\n")
-    print_matrix(aug, m, n, k, decimals, prefix=f"A_bar^({last_step}) = ")
+    print_matrix(aug, m, n, k, decimals, prefix=f"S^({last_step}) = ")
     print(f"\nHạng của A: {rank_A}")
     print(f"Hạng của ma trận bổ sung [A|B]: {rank_aug}\n")
 

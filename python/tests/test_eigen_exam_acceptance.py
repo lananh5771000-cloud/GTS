@@ -60,8 +60,27 @@ def test_symmetric_multiple_deflation_diagonal():
 
 
 def test_complex_dominant_rejected_clearly():
-    with pytest.raises(ArithmeticError, match="cap tri rieng phuc troi"):
+    with pytest.raises(ArithmeticError, match="cap tri rieng phuc troi") as error:
         eigen.dominant_eigenpair([[0.0, -1.0], [1.0, 0.0]], [1.0, 0.0], max_iter=30)
+    text = str(error.value)
+    assert "Không tìm được trị riêng thực trội hội tụ" in text
+    assert "1.000000i" in text
+    assert "-1.000000i" in text
+    assert "quay/dao động" in text
+
+
+def test_unique_dominant_but_iteration_limit_explains_residual_failure():
+    with pytest.raises(ArithmeticError) as error:
+        eigen.dominant_eigenpair(
+            [[2.0, 1.0], [1.0, 3.0]],
+            [1.0, 0.0],
+            epsilon=1e-14,
+            max_iter=1,
+        )
+    text = str(error.value)
+    assert "các lần thử chưa đạt sai số yêu cầu" in text
+    assert "phần dư tương đối nhỏ nhất" in text
+    assert "k_max = 1" in text
 
 
 def test_fixed_iterations_do_not_stop_early():

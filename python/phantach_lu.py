@@ -151,6 +151,12 @@ def identity_matrix(n):
     return [[Fraction(int(i == j)) for j in range(n)] for i in range(n)]
 
 
+def transpose_matrix(matrix):
+    if not matrix:
+        return []
+    return [[matrix[i][j] for i in range(len(matrix))] for j in range(len(matrix[0]))]
+
+
 def multiply_matrices(A, B):
     if not A or not B or len(A[0]) != len(B):
         raise ValueError("Kích thước hai ma trận không phù hợp để nhân.")
@@ -229,6 +235,12 @@ def format_sum_terms(terms):
     return " + ".join(
         f"({exact_number(left)})({exact_number(right)})" for left, right in terms
     )
+
+
+def normal_equation_system(A, B):
+    """Lap he theo dung luong PDF: T=A^T, A_bar=T*A, B_bar=T*B."""
+    T = transpose_matrix(A)
+    return multiply_matrices(T, A), multiply_matrices(T, B)
 
 
 # ============================================================
@@ -336,6 +348,85 @@ def lu_doolittle(A, decimals, show_steps=True):
     return L, U, None
 
 
+# ============================================================
+# PHAN TACH LU CROUT THEO PDF: A = L*U, u_ii = 1
+# ============================================================
+
+
+def lu_crout(A, decimals=7, show_steps=True):
+    """
+    Phan tach LU theo kieu Crout dung trong PDF:
+
+        A = L*U,  U co duong cheo bang 1.
+
+    Cong thuc voi chi so 0-based trong code:
+        l_it = a_it - sum(k=0..t-1) l_ik*u_kt,  i=t..n-1
+        u_tj = (a_tj - sum(k=0..t-1) l_tk*u_kj) / l_tt,  j=t+1..n-1
+    """
+    n = len(A)
+    if n == 0 or any(len(row) != n for row in A):
+        raise ValueError("A phai la ma tran vuong khac rong.")
+
+    L = zero_matrix(n, n)
+    U = identity_matrix(n)
+
+    if show_steps:
+        print("\n" + "=" * 92)
+        print("PHAN TACH LU THEO PHUONG PHAP CROUT (THEO PDF)")
+        print("=" * 92)
+        print("Khoi tao L = O, U = I.")
+        print("Voi t = 1..n:")
+        print("  l_it = a_it - sum(k=1..t-1) l_ik u_kt, i=t..n")
+        print("  neu l_tt = 0 thi khong co phan tach LU Crout khong doi hang")
+        print("  u_tj = (a_tj - sum(k=1..t-1) l_tk u_kj)/l_tt, j=t+1..n")
+        print_lu_pair(L, U, decimals, step=0)
+
+    for t in range(n):
+        for i in range(t, n):
+            terms = [(L[i][k], U[k][t]) for k in range(t)]
+            total = sum((left * right for left, right in terms), Fraction(0))
+            L[i][t] = A[i][t] - total
+            if show_steps:
+                print(f"\nTinh l_{i + 1},{t + 1}:")
+                print(
+                    f"  l_{i + 1},{t + 1} = a_{i + 1},{t + 1} "
+                    f"- sum(k=1..{t}) l_{i + 1},k*u_k,{t + 1}"
+                )
+                print(f"          = {exact_number(A[i][t])} - ({format_sum_terms(terms)})")
+                print(f"          = {exact_number(L[i][t])}")
+
+        if L[t][t] == 0:
+            if show_steps:
+                print("\n" + "-" * 92)
+                print(f"Dung tai buoc {t + 1} vi l_{t + 1},{t + 1} = 0.")
+                print("Khong co phan tach LU Crout khong doi hang.")
+                print_lu_pair(L, U, decimals, step=t + 1)
+            return None, None, t
+
+        for j in range(t + 1, n):
+            terms = [(L[t][k], U[k][j]) for k in range(t)]
+            total = sum((left * right for left, right in terms), Fraction(0))
+            U[t][j] = (A[t][j] - total) / L[t][t]
+            if show_steps:
+                print(f"\nTinh u_{t + 1},{j + 1}:")
+                print(
+                    f"  u_{t + 1},{j + 1} = [a_{t + 1},{j + 1} "
+                    f"- sum(k=1..{t}) l_{t + 1},k*u_k,{j + 1}] / l_{t + 1},{t + 1}"
+                )
+                print(
+                    f"          = [{exact_number(A[t][j])} - ({format_sum_terms(terms)})] "
+                    f"/ {exact_number(L[t][t])}"
+                )
+                print(f"          = {exact_number(U[t][j])}")
+
+        if show_steps:
+            print("\n" + "-" * 92)
+            print(f"Buoc {t + 1}: da tinh cot {t + 1} cua L va hang {t + 1} cua U.")
+            print_lu_pair(L, U, decimals, step=t + 1)
+
+    return L, U, None
+
+
 def plu_decomposition(A, pivot_tolerance=None, show_steps=False):
     """Phân tích PA=LU bằng pivot từng phần, không dùng hàm giải có sẵn."""
     n = len(A)
@@ -402,6 +493,20 @@ def plu_solve(A, B, pivot_tolerance=None, show_steps=False):
     Y = forward_substitution(L, PB, show_steps=show_steps)
     X = back_substitution(U, Y, show_steps=show_steps)
     return X, P, L, U, swaps, near_singular
+
+
+def solve_crout_pdf(A, B, decimals=7, show_steps=False, use_normal_equations=True):
+    """Giai he theo ban PDF: lap normal equation roi phan tach LU Crout."""
+    if use_normal_equations:
+        A_work, B_work = normal_equation_system(A, B)
+    else:
+        A_work, B_work = copy_matrix(A), copy_matrix(B)
+    L, U, failed_index = lu_crout(A_work, decimals, show_steps=show_steps)
+    if failed_index is not None:
+        raise ArithmeticError("Khong co phan tach LU Crout khong doi hang.")
+    Y = forward_substitution(L, B_work, show_steps=show_steps)
+    X = back_substitution(U, Y, show_steps=show_steps)
+    return X, L, U, A_work, B_work
 
 
 # ============================================================
@@ -501,6 +606,13 @@ def determinant_from_u(U):
     return determinant
 
 
+def determinant_from_lu(L, U):
+    determinant = Fraction(1)
+    for i in range(len(L)):
+        determinant *= L[i][i] * U[i][i]
+    return determinant
+
+
 def print_lu_result(A, L, U, decimals):
     print("\n" + "=" * 92)
     print("KẾT QUẢ PHÂN TÁCH LU\n")
@@ -517,8 +629,8 @@ def print_lu_result(A, L, U, decimals):
     else:
         print("\nCảnh báo: L*U khác A.")
 
-    determinant = determinant_from_u(U)
-    print("\ndet(A) = det(L)*det(U) = 1*tích các phần tử trên đường chéo U")
+    determinant = determinant_from_lu(L, U)
+    print("\ndet(A) = det(L)*det(U) = tich duong cheo L nhan tich duong cheo U")
     print(f"det(A) = {exact_number(determinant)}")
 
     return determinant
@@ -580,10 +692,10 @@ def decompose_and_solve(A, B, decimals, inverse_mode=False):
     print_matrix(A_original, decimals, prefix="A = ")
     print_matrix(B_original, decimals, prefix="I = " if inverse_mode else "B = ")
 
-    L, U, failed_index = lu_doolittle(A_original, decimals, show_steps=True)
+    L, U, failed_index = lu_crout(A_original, decimals, show_steps=True)
 
     if failed_index is not None:
-        print("\nLU không đổi hàng không áp dụng được; chuyển sang PLU với pivot từng phần.")
+        print("\nLU Crout không đổi hàng không áp dụng được; chuyển sang PLU với pivot từng phần.")
         try:
             X, P, L, U, swaps, near_singular = plu_solve(
                 A_original, B_original, show_steps=True
@@ -694,7 +806,7 @@ def input_square_matrix():
 
 
 def decompose_only():
-    print("\n--- Phân tách A = L*U theo phương pháp Doolittle ---")
+    print("\n--- Phân tách A = L*U theo phương pháp Crout (theo PDF) ---")
     A = input_square_matrix()
 
     if A is None:
@@ -707,7 +819,7 @@ def decompose_only():
     print("\nMa trận ban đầu:")
     print_matrix(A, decimals, prefix="A = ")
 
-    L, U, failed_index = lu_doolittle(A, decimals, show_steps=True)
+    L, U, failed_index = lu_crout(A, decimals, show_steps=True)
 
     if failed_index is not None:
         explain_failed_decomposition(A)
@@ -760,7 +872,7 @@ def main():
     print("=" * 92)
     print("PHÂN TÁCH LU DOOLITTLE - A = L*U")
     print("=" * 92)
-    print("1. Phân tách ma trận A thành A = L*U")
+    print("1. Phân tách ma trận A thành A = L*U theo Crout (PDF)")
     print("2. Giải hệ phương trình A*X = B bằng phân tách LU")
     print("3. Tìm ma trận nghịch đảo A^(-1) bằng phân tách LU")
     print("0. Thoát")

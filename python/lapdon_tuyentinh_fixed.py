@@ -240,17 +240,18 @@ def simple_iteration(
         eta = relative_residual(A, x_new, b)
         records.append(Record(k, x_new.copy(), difference, error_bound, residual, eta))
         x = x_new
-        if fixed_iterations == 0 and error_bound <= epsilon and residual <= epsilon:
+        # Chế độ PDF dừng theo đúng chặn sai số hậu nghiệm:
+        #     E_k = q/(1-q)||X_k-X_{k-1}|| <= epsilon.
+        # Phần dư ||Ax-b||_∞ chỉ in thêm để kiểm tra, không dùng làm điều kiện dừng.
+        if fixed_iterations == 0 and error_bound <= epsilon:
             converged = True
-            reason = f"E_k và ||Ax-b||_∞ đều <= epsilon = {epsilon:.3e}"
+            reason = f"E_k <= epsilon = {epsilon:.3e} theo công thức hậu nghiệm PDF"
             break
 
     if fixed_iterations > 0:
-        converged = bool(
-            records
-            and records[-1].error_bound <= epsilon
-            and records[-1].residual <= epsilon
-        )
+        # Đúng k bước: chỉ kết luận chứng nhận nếu chặn hậu nghiệm đã đạt epsilon;
+        # không ép thêm điều kiện phần dư vì PDF không dùng phần dư để dừng.
+        converged = bool(records and records[-1].error_bound <= epsilon)
     elif not converged:
         reason = f"đạt k_max={maximum_iterations} nhưng chưa thỏa epsilon"
     return Result(x, records, q, converged, reason)
@@ -261,14 +262,15 @@ def print_theory() -> None:
     print("Input:")
     print("  • Hệ Ax=b và vector đầu x^(0).")
     print("  • Tham số tau để đưa hệ về x=Bx+d với B=I-tau*A, d=tau*b.")
-    print("Output: nghiệm gần đúng, bảng lặp, chặn sai số và phần dư.")
+    print("Output: nghiệm gần đúng, bảng lặp và chặn sai số theo PDF.")
     print("Các bước:")
     print("  B1. Chọn tau và lập B=I-tau*A, d=tau*b.")
     print("  B2. Kiểm tra q=||B||<1 trong chuẩn 1 hoặc chuẩn vô cùng.")
     print("  B3. Lặp x^(k+1)=B x^(k)+d.")
-    print("  B4. Chặn hậu nghiệm:")
-    print("            ||x^(k)-x*|| <= q/(1-q)||x^(k)-x^(k-1)||.")
-    print("  B5. Kiểm tra thêm phần dư r^(k)=b-Ax^(k).")
+    print("  B4. Chặn hậu nghiệm theo PDF:")
+    print("            E_k = q/(1-q)||x^(k)-x^(k-1)||.")
+    print("            Dừng khi E_k <= epsilon.")
+    print("  B5. Có thể in thêm phần dư r^(k)=b-Ax^(k) để kiểm tra, nhưng không dùng làm điều kiện dừng PDF.")
     print("Với A đối xứng xác định dương, tau tối ưu theo chuẩn phổ là")
     print("            tau=2/(lambda_min+lambda_max).")
 
@@ -277,7 +279,7 @@ def print_table(records: list[Record], decimals: int) -> None:
     if not records:
         return
     n = records[0].x.size
-    headers = ["k"] + [f"x{i + 1}^(k)" for i in range(n)] + ["||dx||", "E_k", "||r||inf", "eta"]
+    headers = ["k"] + [f"x{i + 1}^(k)" for i in range(n)] + ["||dx||", "E_k", "||r||∞", "eta"]
     rows = []
     for record in records:
         rows.append([
@@ -434,8 +436,9 @@ def main() -> None:
         print(f"||Ax-b||_∞={np.linalg.norm(residual, np.inf):.7e}")
     if result.records and math.isfinite(result.records[-1].error_bound):
         print(f"Chặn sai số hậu nghiệm E_k={result.records[-1].error_bound:.7e}.")
+        print("Theo PDF, điều kiện dừng của lặp đơn là E_k <= epsilon; phần dư chỉ là kiểm tra thêm.")
     if result.converged:
-        print("KẾT LUẬN: nghiệm gần đúng đạt sai số epsilon đã nhập.")
+        print("KẾT LUẬN: nghiệm gần đúng đạt sai số epsilon theo chặn hậu nghiệm PDF.")
     elif fixed_iterations:
         print("KẾT LUẬN: đây là nghiệm gần đúng sau đúng số bước đề yêu cầu.")
     else:

@@ -1312,6 +1312,49 @@ def compute_error_bounds(q, norm, x_new, x_old, phi_at_new):
     return e1, e2, min(e1, e2)
 
 
+def priori_iteration_count(q, epsilon, first_difference):
+    """So buoc tien nghiem: n=ceil(log_q(eps*(1-q)/||Phi(X0)-X0||))."""
+    if not (math.isfinite(q) and math.isfinite(epsilon) and math.isfinite(first_difference)):
+        raise ValueError("q, epsilon va first_difference phai huu han.")
+    if epsilon <= 0 or first_difference < 0 or not (0 <= q < 1):
+        raise ValueError("Can epsilon>0, first_difference>=0 va 0<=q<1.")
+    if first_difference == 0 or q == 0:
+        return 1
+    ratio = epsilon * (1 - q) / first_difference
+    if ratio >= 1:
+        return 1
+    return max(1, math.ceil(math.log(ratio) / math.log(q)))
+
+
+def fixed_point_iteration_priori(
+    phi,
+    symbols,
+    x0,
+    bounds,
+    q,
+    norm,
+    epsilon,
+    **kwargs,
+):
+    first = evaluate_real_vector(phi, symbols, x0)
+    first_difference = vector_norm([a - b for a, b in zip(first, x0)], norm)
+    steps = priori_iteration_count(q, epsilon, first_difference)
+    result = fixed_point_iteration(
+        phi,
+        symbols,
+        x0,
+        bounds,
+        q,
+        norm,
+        epsilon=epsilon,
+        exact_steps=steps,
+        **kwargs,
+    )
+    result["priori_steps"] = steps
+    result["priori_first_difference"] = first_difference
+    return result
+
+
 def fixed_point_iteration(
     phi,
     symbols,
@@ -1526,7 +1569,12 @@ def print_exam_proof(
                 "B5. Dừng khi ||tₖ−tₖ₋₁||/||tₖ|| ≤ (1−q)δ/q.  B6. Trả ra nghiệm gần đúng."
             )
     elif stop_kind == "absolute":
-        print("B5. Dừng khi q||tₖ−tₖ₋₁||/(1−q) ≤ δ.  B6. Trả ra nghiệm gần đúng.")
+        print("B5. Dừng theo sai số hậu nghiệm q||tₖ−tₖ₋₁||/(1−q) ≤ δ.  B6. Trả ra nghiệm gần đúng.")
+    elif stop_kind == "priori":
+        print(
+            "B5. Tính n = ceil(log_q(δ(1−q)/||t₁−t₀||)).  "
+            "B6. Lặp đúng n bước rồi trả ra nghiệm gần đúng."
+        )
     else:
         print("B5. Thực hiện đúng k bước lặp.  B6. Trả ra giá trị gần đúng.")
 
@@ -1896,29 +1944,23 @@ def exam_main():
     else:
         x0 = [(a + b) / 2 for a, b in active_bounds]
     print(
-        "\nYêu cầu dừng:\n1. Sai số tuyệt đối\n2. Sai số tương đối\n3. Đúng k bước\n4. d chữ số thập phân tin cậy"
+        "\nYêu cầu dừng:\n1. Sai số tiên nghiệm\n2. Sai số hậu nghiệm\n3. Đúng k bước\n4. Sai số tương đối nếu đang hỗ trợ"
     )
     stop = read_int("Lựa chọn = ", 1)
     epsilon = None
     relative = False
     steps = None
     max_iter = 1000
-    if stop in (1, 2):
+    if stop in (1, 2, 4):
         epsilon = read_number("δ = ", positive=True)
-        relative = stop == 2
+        relative = stop == 4
         max_iter = read_int("max_iter = ", 1)
     elif stop == 3:
         steps = read_int("k = ", 0)
-    elif stop == 4:
-        d = read_int("d = ", 0)
-        epsilon = 0.5 * 10 ** (-d)
-        max_iter = read_int("max_iter = ", 1)
     else:
         raise InputError("Lựa chọn điều kiện dừng không hợp lệ.")
 
-    stop_kind = (
-        "relative" if relative else ("absolute" if epsilon is not None else "fixed")
-    )
+    stop_kind = "priori" if stop == 1 else ("relative" if relative else ("absolute" if epsilon is not None else "fixed"))
     if not print_exam_proof(
         chosen, symbols, active_bounds, F, mode == 2, bounds, precision, stop_kind
     ):
@@ -1932,23 +1974,39 @@ def exam_main():
             f"Ngưỡng dừng tương đối: (1-q)/q · δ = {format_number(threshold, precision)}."
         )
     F_lipschitz, F_scale = bound_system_lipschitz(F, symbols, active_bounds)
-    result = fixed_point_iteration(
-        chosen.phi,
-        symbols,
-        x0,
-        active_bounds,
-        chosen.q,
-        chosen.selected_norm,
-        F,
-        epsilon,
-        relative,
-        steps,
-        max_iter,
-        banach_proven=True,
-        equation_residual_tolerance=epsilon if epsilon is not None else None,
-        F_lipschitz=F_lipschitz,
-        F_scale=F_scale,
-    )
+    if stop == 1:
+        result = fixed_point_iteration_priori(
+            chosen.phi,
+            symbols,
+            x0,
+            active_bounds,
+            chosen.q,
+            chosen.selected_norm,
+            epsilon,
+            F=F,
+            banach_proven=True,
+            equation_residual_tolerance=epsilon,
+            F_lipschitz=F_lipschitz,
+            F_scale=F_scale,
+        )
+    else:
+        result = fixed_point_iteration(
+            chosen.phi,
+            symbols,
+            x0,
+            active_bounds,
+            chosen.q,
+            chosen.selected_norm,
+            F,
+            epsilon,
+            relative,
+            steps,
+            max_iter,
+            banach_proven=True,
+            equation_residual_tolerance=epsilon if epsilon is not None else None,
+            F_lipschitz=F_lipschitz,
+            F_scale=F_scale,
+        )
     print_iteration_table(result, precision, stop_kind, chosen.selected_norm)
     print("\nPHẦN 9. KIỂM TRA ĐIỀU KIỆN DỪNG")
     last = result["rows"][-1] if result["rows"] else None

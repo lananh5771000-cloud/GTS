@@ -166,6 +166,10 @@ def print_custom_algorithm(
         print(
             f"5. Điều kiện dừng: Sai số tuyệt đối của x: \u0394x = |f(x_k)|/m1 \u2264 {target_val}"
         )
+    elif cond_type == "x_two":
+        print(
+            f"5. Điều kiện dừng: Sai số hai lần liên tiếp: \u0394x = ((M1-m1)/m1)|x_k-x_{{k-1}}| \u2264 {target_val}"
+        )
     elif cond_type == "x_rel":
         print(
             f"5. Điều kiện dừng: \u03b4x \u2264 \u0394x/(|x_k|-\u0394x) \u2264 {target_val}, cần |x_k|>\u0394x"
@@ -388,16 +392,16 @@ def secant_method(max_iter=1000):
             target_val = int(input("Nhập số lần lặp tối đa: "))
             cond_type = "iter"
     else:
-        print("1. Sai số tuyệt đối của x (\u0394x = |f(x_k)|/m1 \u2264 \u03b5)")
-        print("2. Chặn tương đối của x (\u03b4x \u2264 \u0394x/(|x_k|-\u0394x) \u2264 \u03b5)")
-        print("3. Dừng theo số lần lặp cố định")
+        print("1. Sai số mục tiêu \u0394 = |f(x_k)|/m1")
+        print("2. Sai số hai lần liên tiếp \u0394 = ((M1-m1)/m1)|x_k-x_{k-1}|")
+        print("3. Đúng k bước")
         choice = input("Lựa chọn (1/2/3): ")
         if choice == "1":
             target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
             cond_type = "x_abs"
         elif choice == "2":
-            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
-            cond_type = "x_rel"
+            target_val = parse_real(input("Nhập sai số mục tiêu epsilon = "))
+            cond_type = "x_two"
         else:
             target_val = int(input("Nhập số lần lặp tối đa: "))
             cond_type = "iter"
@@ -408,7 +412,8 @@ def secant_method(max_iter=1000):
     if use_G == "y":
         header = f"{'k':<3} | {'x⁽ᵏ⁾':<15} | {'f(x⁽ᵏ⁾)':<15} | {'Eₓ':<15} | {G_name:<15} | {'Bᴳ/XPᴳ':<15} | {'Bᴳ tương đối':<15}"
     else:
-        header = f"{'k':<3} | {'x⁽ᵏ⁾':<15} | {'f(x⁽ᵏ⁾)':<15} | {'Δx (Tuyệt đối)':<18} | {'δx (Tương đối)':<18}"
+        delta_label = "Δx = |f(x_k)|/m1" if cond_type == "x_abs" else "Δx = ((M1-m1)/m1)|x_k-x_{k-1}|"
+        header = f"{'k':<3} | {'x⁽ᵏ⁾':<15} | {'f(x⁽ᵏ⁾)':<15} | {delta_label:<28} | {'δx (Tương đối)':<18}"
 
     print("-" * len(header))
     print(header)
@@ -468,14 +473,14 @@ def secant_method(max_iter=1000):
                 print("    ΔG chỉ là xấp xỉ bậc nhất/kiểm tra số; không dùng để chứng nhận dừng.")
         else:
             print(
-                f"{k:<3} | {xk:<15.{precision}f} | {fxk:<15.{precision}e} | {delta_x:<18.{precision}e} | {delta_x_rel:<18.{precision}e}"
+                f"{k:<3} | {xk:<15.{precision}f} | {fxk:<15.{precision}e} | {delta_x:<28.{precision}e} | {delta_x_rel:<18.{precision}e}"
             )
 
             if cond_type == "iter" and k >= target_val:
                 break
             elif cond_type == "x_abs" and delta_x <= target_val:
                 break
-            elif cond_type == "x_rel" and delta_x_rel <= target_val:
+            elif cond_type == "x_two" and delta_x <= target_val:
                 break
 
         # Công thức lặp dây cung (1 đầu mút d cố định)

@@ -40,6 +40,27 @@ class FunctionErrorBound:
     description: str
 
 
+def priori_iteration_count(q: float, epsilon: float, first_difference: float) -> int:
+    """n=ceil(log_q(epsilon*(1-q)/|phi(x0)-x0|)) cho sai so tien nghiem."""
+    if not all(math.isfinite(v) for v in (q, epsilon, first_difference)):
+        raise ValueError("q, epsilon va first_difference phai huu han.")
+    if not (0 <= q < 1) or epsilon <= 0 or first_difference < 0:
+        raise ValueError("Can 0<=q<1, epsilon>0 va first_difference>=0.")
+    if first_difference == 0 or q == 0:
+        return 1
+    ratio = epsilon * (1 - q) / first_difference
+    if ratio >= 1:
+        return 1
+    return max(1, math.ceil(math.log(ratio) / math.log(q)))
+
+
+def posteriori_error_bound(q: float, difference: float) -> float | None:
+    """Delta=q/(1-q)*|x_k-x_{k-1}| cho sai so hau nghiem."""
+    if not math.isfinite(q) or q < 0 or q >= 1:
+        return None
+    return q / (1 - q) * abs(difference)
+
+
 def bound_function_error(
     function: Callable[[float], float],
     derivative: Callable[[float], float],
@@ -241,6 +262,39 @@ def fixed_point(
     )
 
 
+def fixed_point_priori(
+    phi: Callable[[float], float],
+    derivative: Callable[[float], float],
+    a: float,
+    b: float,
+    x0: float,
+    epsilon: float,
+    **kwargs,
+) -> FixedPointResult:
+    first_difference = abs(float(phi(x0)) - x0)
+    probe = fixed_point(
+        phi,
+        derivative,
+        a,
+        b,
+        x0,
+        epsilon,
+        fixed_iterations=1,
+        **kwargs,
+    )
+    steps = priori_iteration_count(probe.q, epsilon, first_difference)
+    return fixed_point(
+        phi,
+        derivative,
+        a,
+        b,
+        x0,
+        epsilon,
+        fixed_iterations=steps,
+        **kwargs,
+    )
+
+
 def print_custom_algorithm(
     phi_expr,
     a,
@@ -274,6 +328,10 @@ def print_custom_algorithm(
             print(f"   \u0394x = [q / (1-q)] * |x_n - x_{{n-1}}| \u2264 {target_val}")
         else:
             print("   Chỉ theo dõi |x_n-x_{n-1}|; không coi đây là chặn sai số nghiệm.")
+    elif cond_type == "priori":
+        print("5. Điều kiện dừng: Sai số tiên nghiệm của x:")
+        print("   n = ceil(log_q(\u03b5(1-q)/|\u03c6(x0)-x0|))")
+        print(f"   Thực hiện đúng n = {int(target_val)} bước lặp.")
     elif cond_type == "x_rel":
         print("5. Điều kiện dừng: Sai số tương đối của x:")
         print(f"   \u03b4x \u2264 \u0394x / (|x_n|-\u0394x) \u2264 {target_val}, cần |x_n|>\u0394x")
@@ -452,44 +510,38 @@ def fixed_point_iteration(max_iter=10000):
     target_val = 0
     cond_type = ""
 
-    if use_G == "y":
-        print(f"1. Sai số tuyệt đối của hàm {G_name} (\u0394{G_name} \u2264 \u03b5)")
-        print(f"2. Chặn tương đối B_G/(|{G_name}(x_n)|-B_G) \u2264 \u03b5")
-        print("3. Dừng theo số lần lặp cố định")
-        choice = input("Lựa chọn (1/2/3): ")
-        if choice == "1":
-            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
-            cond_type = "G_abs"
-        elif choice == "2":
-            target_val = parse_real(input("Nhập \u03b5 mục tiêu (vd: 0.5e-3): "))
-            cond_type = "G_rel"
+    print("1. Sai số tiên nghiệm của x")
+    print("2. Sai số hậu nghiệm của x")
+    print("3. Đúng k bước")
+    print("4. Sai số tương đối của x")
+    choice = input("Lựa chọn (1/2/3/4): ")
+    if choice == "1":
+        target_val = parse_real(input("Nhập epsilon tiên nghiệm = "))
+        cond_type = "priori"
+        if q < 1 and q > 0:
+            x1_temp = float(phi_expr.subs(x, x0))
+            first_difference = abs(x1_temp - x0)
+            if first_difference > 0:
+                n_estimate = priori_iteration_count(q, target_val, first_difference)
+                print(
+                    f"\n[Công thức tiên nghiệm] n = ceil(log_q(epsilon(1-q)/|phi(x0)-x0|)) = {n_estimate}."
+                )
+                target_val = n_estimate
+            else:
+                print("\n[Công thức tiên nghiệm] x0 đã là điểm bất động, lấy n = 1.")
+                target_val = 1
         else:
-            target_val = int(input("Nhập số lần lặp tối đa: "))
-            cond_type = "iter"
+            print("\n[Cảnh báo] q không thuộc (0,1), công thức tiên nghiệm chỉ mang tính tham khảo.")
+            target_val = max_iter
+    elif choice == "2":
+        target_val = parse_real(input("Nhập sai số hậu nghiệm epsilon = "))
+        cond_type = "x_abs"
+    elif choice == "3":
+        target_val = int(input("Nhập số lần lặp k = "))
+        cond_type = "iter"
     else:
-        print("1. Sai số tuyệt đối của x (\u0394x_Hậu_Nghiệm \u2264 \u03b5)")
-        print("2. Chặn tương đối của x (\u03b4x \u2264 \u0394x/(|x_n|-\u0394x) \u2264 \u03b5)")
-        print("3. Dừng theo số lần lặp cố định")
-        choice = input("Lựa chọn (1/2/3): ")
-        if choice == "1":
-            target_val = parse_real(input("Nhập sai số tuyệt đối epsilon = "))
-            cond_type = "x_abs"
-            # Dự đoán số bước
-            if q < 1 and q > 0:
-                x1_temp = float(phi_expr.subs(x, x0))
-                if x1_temp != x0:
-                    val = (target_val * (1 - q)) / abs(x1_temp - x0)
-                    if val > 0:
-                        n_estimate = math.ceil(math.log(val) / math.log(q))
-                        print(
-                            f"\n[Dự đoán] Theo sai số tiên nghiệm, cần khoảng {max(1, n_estimate)} bước lặp."
-                        )
-        elif choice == "2":
-            target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
-            cond_type = "x_rel"
-        else:
-            target_val = int(input("Nhập số lần lặp tối đa: "))
-            cond_type = "iter"
+        target_val = parse_real(input("Nhập sai số tương đối epsilon = "))
+        cond_type = "x_rel"
 
     if cond_type != "iter" and (not math.isfinite(target_val) or target_val <= 0):
         print("[X] epsilon phải dương và hữu hạn.")
@@ -578,21 +630,23 @@ def fixed_point_iteration(max_iter=10000):
             )
 
             if n > 0:
-                if cond_type == "iter" and n >= target_val:
+                if cond_type == "priori" and n >= target_val:
                     break
-                elif cond_type == "G_abs" and G_bound_certified and delta_G_val <= target_val:
+                elif cond_type == "iter" and n >= target_val:
                     break
-                elif cond_type == "G_rel" and G_bound_certified and delta_G_rel <= target_val:
+                elif cond_type == "x_abs" and q < 1 and mapping_ok and delta_x <= target_val:
                     break
-                elif cond_type in {"G_abs", "G_rel"} and not G_bound_certified:
-                    print("    Chỉ có xấp xỉ sai số bậc nhất của G; không dùng để chứng nhận dừng.")
+                elif cond_type == "x_rel" and q < 1 and mapping_ok and delta_x_rel <= target_val:
+                    break
         else:
             print(
                 f"{n:<3} | {xn:<15.{precision}f} | {str_dx_pri} | {str_dx_post} | {str_dx_rel}"
             )
 
             if n > 0:
-                if cond_type == "iter" and n >= target_val:
+                if cond_type == "priori" and n >= target_val:
+                    break
+                elif cond_type == "iter" and n >= target_val:
                     break
                 elif cond_type == "x_abs" and q < 1 and mapping_ok and delta_x <= target_val:
                     break
@@ -627,11 +681,14 @@ def fixed_point_iteration(max_iter=10000):
     print(f"=> Quá trình lặp hoàn tất tại bước {n}.")
 
     # In thuật toán
-    print_algo = (
-        input("\nIn phần thuật toán để chép bài? [C/k]: ")
-        .strip()
-        .lower()
-    )
+    try:
+        print_algo = (
+            input("\nIn phần thuật toán để chép bài? [C/k]: ")
+            .strip()
+            .lower()
+        )
+    except (EOFError, StopIteration):
+        print_algo = "n"
     if print_algo in {"", "c", "co", "có", "y", "yes"}:
         print_custom_algorithm(
             phi_input, a, b, x0, q, cond_type, target_val, n, xn, precision, G_name
